@@ -1,0 +1,45 @@
+name: Build patched CodexBar app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/opencodego-api-source]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Xcode 26.6
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          /usr/bin/xcodebuild -version
+
+      - name: Build ad-hoc signed app
+        env:
+          ARCHES: arm64
+          CODEXBAR_SIGNING: adhoc
+        run: ./Scripts/package_app.sh release
+
+      - name: Verify and archive app
+        run: |
+          set -euo pipefail
+          test -x CodexBar.app/Contents/MacOS/CodexBar
+          codesign --verify --deep --strict CodexBar.app
+          ditto -c -k --sequesterRsrc --keepParent CodexBar.app CodexBar-opencodego-api-fix-arm64.zip
+          shasum -a 256 CodexBar-opencodego-api-fix-arm64.zip > CodexBar-opencodego-api-fix-arm64.zip.sha256
+
+      - name: Upload app
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: CodexBar-opencodego-api-fix-arm64
+          path: |
+            CodexBar-opencodego-api-fix-arm64.zip
+            CodexBar-opencodego-api-fix-arm64.zip.sha256
+          if-no-files-found: error

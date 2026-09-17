@@ -18,6 +18,11 @@ struct OpenCodeGoProviderImplementation: ProviderImplementation {
     }
 
     @MainActor
+    func sourceMode(context: ProviderSourceModeContext) -> ProviderSourceMode {
+        context.settings.providerConfig(for: .opencodego)?.source ?? .auto
+    }
+
+    @MainActor
     func settingsSnapshot(context: ProviderSettingsSnapshotContext) -> ProviderSettingsSnapshotContribution? {
         .opencodego(context.settings.opencodegoSettingsSnapshot(tokenOverride: context.tokenOverride))
     }
