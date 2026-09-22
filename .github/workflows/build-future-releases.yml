@@ -62,19 +62,12 @@ jobs:
           git checkout --detach "$UPSTREAM_TAG"
 
           implementation="Sources/CodexBar/Providers/OpenCodeGo/OpenCodeGoProviderImplementation.swift"
-          if rg -q 'func sourceMode\(context: ProviderSourceModeContext\)' "$implementation"; then
+          if grep -q 'func sourceMode(context: ProviderSourceModeContext)' "$implementation"; then
             echo "Upstream already handles source mode; no patch needed."
           else
             git apply --check "$patch_file"
             git apply "$patch_file"
           fi
-
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add "$implementation"
-          git commit --allow-empty -m "Build ${UPSTREAM_TAG} with OpenCode Go API source fix"
-          git tag "$PATCHED_TAG"
-          git push origin "$PATCHED_TAG"
 
       - name: Select Xcode 26.6
         if: steps.release.outputs.skip != 'true'
@@ -114,6 +107,7 @@ jobs:
             "$archive" \
             "${archive}.sha256" \
             --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --title "CodexBar ${UPSTREAM_TAG} — OpenCode Go API fix" \
             --notes "Automated arm64 build of steipete/CodexBar ${UPSTREAM_TAG}. Applies the OpenCode Go API source fix when upstream does not already contain it. Ad-hoc signed; automatic Sparkle updates are disabled."
 
