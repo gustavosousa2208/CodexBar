@@ -1,0 +1,128 @@
+name: Build future patched releases
+
+on:
+  schedule:
+    - cron: "17 11 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Optional upstream tag, for example v0.60.4"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: patched-codexbar-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve upstream release
+        id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED_TAG:-}"
+          if [[ -z "$tag" ]]; then
+            tag="$(gh api repos/steipete/CodexBar/releases/latest --jq .tag_name)"
+          fi
+          patched_tag="patched-${tag}"
+          if gh release view "$patched_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release $patched_tag already exists."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "upstream_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "patched_tag=$patched_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Apply patch to upstream source
+        if: steps.release.outputs.skip != 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+          PATCHED_TAG: ${{ steps.release.outputs.patched_tag }}
+        run: |
+          set -euo pipefail
+          patch_file="$RUNNER_TEMP/opencodego-api-source.patch"
+          cp .github/patches/opencodego-api-source.patch "$patch_file"
+          git remote add canonical https://github.com/steipete/CodexBar.git
+          git fetch --force canonical "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+          git checkout --detach "$UPSTREAM_TAG"
+
+          implementation="Sources/CodexBar/Providers/OpenCodeGo/OpenCodeGoProviderImplementation.swift"
+          if rg -q 'func sourceMode\(context: ProviderSourceModeContext\)' "$implementation"; then
+            echo "Upstream already handles source mode; no patch needed."
+          else
+            git apply --check "$patch_file"
+            git apply "$patch_file"
+          fi
+
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add "$implementation"
+          git commit --allow-empty -m "Build ${UPSTREAM_TAG} with OpenCode Go API source fix"
+          git tag "$PATCHED_TAG"
+          git push origin "$PATCHED_TAG"
+
+      - name: Select Xcode 26.6
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          /usr/bin/xcodebuild -version
+
+      - name: Build ad-hoc signed arm64 app
+        if: steps.release.outputs.skip != 'true'
+        env:
+          ARCHES: arm64
+          CODEXBAR_SIGNING: adhoc
+        run: ./Scripts/package_app.sh release
+
+      - name: Verify and archive app
+        if: steps.release.outputs.skip != 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          archive="CodexBar-${UPSTREAM_TAG}-opencodego-api-fix-arm64.zip"
+          test -x CodexBar.app/Contents/MacOS/CodexBar
+          codesign --verify --deep --strict CodexBar.app
+          ditto -c -k --sequesterRsrc --keepParent CodexBar.app "$archive"
+          shasum -a 256 "$archive" > "${archive}.sha256"
+          echo "archive=$archive" >> "$GITHUB_ENV"
+
+      - name: Publish patched release
+        if: steps.release.outputs.skip != 'true'
+        env:
+          PATCHED_TAG: ${{ steps.release.outputs.patched_tag }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$PATCHED_TAG" \
+            "$archive" \
+            "${archive}.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CodexBar ${UPSTREAM_TAG} — OpenCode Go API fix" \
+            --notes "Automated arm64 build of steipete/CodexBar ${UPSTREAM_TAG}. Applies the OpenCode Go API source fix when upstream does not already contain it. Ad-hoc signed; automatic Sparkle updates are disabled."
+
+      - name: Upload workflow artifact
+        if: steps.release.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: CodexBar-${{ steps.release.outputs.upstream_tag }}-opencodego-api-fix-arm64
+          path: |
+            ${{ env.archive }}
+            ${{ env.archive }}.sha256
+          if-no-files-found: error

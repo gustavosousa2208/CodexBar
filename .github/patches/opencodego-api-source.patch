@@ -1,0 +1,15 @@
+diff --git a/Sources/CodexBar/Providers/OpenCodeGo/OpenCodeGoProviderImplementation.swift b/Sources/CodexBar/Providers/OpenCodeGo/OpenCodeGoProviderImplementation.swift
+--- a/Sources/CodexBar/Providers/OpenCodeGo/OpenCodeGoProviderImplementation.swift
++++ b/Sources/CodexBar/Providers/OpenCodeGo/OpenCodeGoProviderImplementation.swift
+@@ -17,6 +17,11 @@ struct OpenCodeGoProviderImplementation: ProviderImplementation {
+         _ = settings[providerConfig: .opencodego, field: .apiKey]
+     }
+ 
++    @MainActor
++    func sourceMode(context: ProviderSourceModeContext) -> ProviderSourceMode {
++        context.settings.providerConfig(for: .opencodego)?.source ?? .auto
++    }
++
+     @MainActor
+     func settingsSnapshot(context: ProviderSettingsSnapshotContext) -> ProviderSettingsSnapshotContribution? {
+         .opencodego(context.settings.opencodegoSettingsSnapshot(tokenOverride: context.tokenOverride))
