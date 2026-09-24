@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: patched-codexbar-release
@@ -110,6 +111,20 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "CodexBar ${UPSTREAM_TAG} — OpenCode Go API fix" \
             --notes "Automated arm64 build of steipete/CodexBar ${UPSTREAM_TAG}. Applies the OpenCode Go API source fix when upstream does not already contain it. Ad-hoc signed; automatic Sparkle updates are disabled."
+
+      - name: Notify repository owner
+        if: steps.release.outputs.skip != 'true'
+        env:
+          PATCHED_TAG: ${{ steps.release.outputs.patched_tag }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PATCHED_TAG}"
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --assignee "$GITHUB_REPOSITORY_OWNER" \
+            --title "Patched CodexBar ${UPSTREAM_TAG} is ready" \
+            --body "The automated OpenCode Go API-fix build is ready: ${release_url}"
 
       - name: Upload workflow artifact
         if: steps.release.outputs.skip != 'true'
