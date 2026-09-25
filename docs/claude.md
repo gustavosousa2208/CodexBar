@@ -51,27 +51,84 @@ Admin API key setup:
   - Inline 30-day dashboard chart when daily buckets are present.
   - Identity login method: `Admin API`.
 
+### Optional workspace spend
+
+Enable **Show workspace spend** in Settings → Providers → Claude, set `claudeWorkspaceSpendEnabled: true` on the
+Claude provider config entry, or set `ANTHROPIC_ADMIN_WORKSPACE_SPEND=true`. It is off by default and applies only
+to the Admin API source.
+
+The existing [cost report](https://platform.claude.com/docs/en/api/admin/cost_report/retrieve) request adds
+`group_by[]=workspace_id` alongside `group_by[]=description`; no extra request or credentials are required.
+The organization totals, cost items, token summaries, and daily chart remain unchanged. When more than one workspace
+has cost rows, **Workspace spend · 30d** shows up to 20 workspaces, highest spend first, over the same 30-day buckets
+as the organization total. Labels use workspace IDs; a null workspace is **Default**. Amounts are converted from
+Anthropic's USD cents to dollars. A single workspace keeps the existing organization view.
+
+## Recover usage when Claude is already signed in
+
+A working Claude Code login or Claude browser tab does not by itself confirm that CodexBar can read that
+session. For example, OAuth can report missing credentials, the CLI probe can time out, and Web can report
+`No Claude session key found in browser cookies.` on the same machine. Diagnose the selected source before
+signing out or replacing credentials.
+
+If Claude works in Chrome but CodexBar cannot import its browser session:
+
+1. Open `https://claude.ai` in Chrome and confirm the intended account is signed in.
+2. In Settings → Providers → Claude, select **Web API (cookies)** and leave the cookie source on **Auto**.
+   This uses the browser session for session, weekly, and available model-specific quotas.
+3. In Settings → Advanced, confirm **Disable Keychain access** is off. Chromium cookie decryption needs
+   the browser's Safe Storage Keychain item; Claude's OAuth prompt policy controls a different credential.
+4. Explicitly retry the import from Terminal:
+
+   ```bash
+   codexbar cookie refresh --provider claude --allow-keychain-prompt
+   ```
+
+   Approve the expected macOS Keychain prompt for the installed CodexBarCLI and the browser's Safe Storage
+   item. The command never prints cookie values. A prior denial can suppress imports for six hours;
+   this explicit retry can bypass that cooldown, while ordinary refresh attempts may remain suppressed.
+   See [Keychain prompts](keychain-prompts.md) for permission details.
+5. Click **Refresh** in Claude's settings and confirm that **Updated just now** appears with current quota
+   bars and no fetch error. Local cost totals or last-known quota bars alone do not prove a successful refresh.
+
+This recovers browser-session access; it does not repair missing OAuth credentials. If the refreshed session
+instead reports a Cloudflare challenge, follow the network guidance under Web API below rather than repeating
+the cookie import.
+
 ## Keychain prompt policy (Claude OAuth)
+
 - Preferences → Providers → Claude → Keychain prompt policy.
 - Options:
   - `Never prompt`: never attempts interactive Claude OAuth Keychain prompts.
   - `Only on user action` (default): interactive prompts are reserved for user-initiated repair flows.
   - `Always allow prompts`: allows interactive prompts in both user and background flows.
 - This setting only affects Claude OAuth Keychain prompting behavior; it does not switch your Claude usage source.
+- The policy also applies to the experimental `/usr/bin/security` reader and delegated OAuth refresh through
+  `claude`: background operations that can prompt require `Always allow prompts`.
+- CodexBar's `Always allow prompts` permits future prompts; macOS's **Always Allow** grants access to the current
+  Keychain item. Claude Code can recreate `Claude Code-credentials` and reset that grant. An ACL entry still named
+  CodexBar does not prove that its stored code-signing requirement matches the running binary. `Only on user action`
+  reduces background interruptions but may require a manual Refresh to recover OAuth access.
 - If Preferences → Advanced → Disable Keychain access is enabled, this policy remains visible but inactive until
   Keychain access is re-enabled.
 
 ### Debug selection (debug menu enabled)
 - The Debug pane can force OAuth / Web / CLI.
 - Web extras are internal-only (not exposed in the Providers pane).
+- CLI Web enrichment requires matching nonempty account emails; an organization display name alone cannot authorize
+  merging another session's optional usage or spend. OAuth enrichment retains verified organization-UUID matching.
 
 ## OAuth API (preferred)
 - OAuth refresh form-encodes credential values, preserving literal plus signs and other reserved characters.
+- Expiry values outside the diagnostic integer range are reported as `out_of_range` without changing credential expiry or refresh decisions.
 - Credentials:
   - CodexBar OAuth cache when available.
   - File fallback: `~/.claude/.credentials.json`.
   - Claude CLI Keychain bootstrap/repair fallback: `Claude Code-credentials`.
-- For the default CLI profile, expired cached credentials can adopt a changed, fresh CLI Keychain token after file fallback. Existing direct-read consent, prompt policy, cooldown, and noninteractive-read checks still apply. Custom profiles are not recovered from the unscoped global item, and CLI credentials are never rewritten by this synchronization.
+- When a CodexBar-owned OAuth cache item's ACL rejects the current build, fresh credentials from an allowed source
+  can replace that cache item using no-UI deletion and creation. A locked or inconclusive Keychain is preserved;
+  failed ACL repairs back off for five minutes. This never deletes or recreates Claude Code's credential item.
+- For the default CLI profile, expired cached or file credentials can adopt a fresh CLI Keychain token after file fallback, even when its fingerprint was already observed during an earlier repair. Existing direct-read consent, prompt policy, cooldown, one-minute freshness-check throttle, and noninteractive-read checks still apply. Custom profiles are not recovered from the unscoped global item, and CLI credentials are never rewritten by this synchronization. Background recovery still requires the Always allow prompts policy; the default Only on user action policy requires an explicit Refresh.
 - On Claude Code 2.1.x, `Claude Code-credentials` may contain only MCP server OAuth state (`mcpOAuth`) with no `claudeAiOauth`. CodexBar treats that as an OAuth configuration error, does not run background delegated `claude /status` refresh, and surfaces re-auth guidance. Use Web or CLI usage source, or restore a valid Claude OAuth keychain entry. See #1844.
 - Requires `user:profile` scope (CLI tokens with only `user:inference` cannot call usage).
 - Missing-scope errors require a Claude Code sign-in token with usage access. `claude setup-token` produces a token for model requests and is not a usage-scope recovery step ([Claude Code authentication](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)). Remove any configured OAuth token override before switching Claude Source to Web/CLI.
@@ -98,9 +155,19 @@ Admin API key setup:
   rows in desktop widgets. It is off by default; turning it on displays every known Claude window with a
   `claude-weekly-scoped-` identifier (for example, Fable). Turning it back off also drops scoped rows that a previous
   snapshot persisted. It does not change fetching, the menu, history, notifications, hooks, or CLI output.
-- Refreshing credentials for the same identified account preserves quota-threshold warning history. Warnings re-arm
-  when remaining quota recovers above a threshold and fire again on a later downward crossing. Unknown account
-  ownership still retires the unowned warning state instead of sharing it across potentially different accounts.
+- Refreshing credentials for the same identified account preserves quota-threshold warning history. Verified
+  credential-owner/account bindings also preserve threshold history when active-account metadata temporarily
+  disappears or OAuth falls back to CLI. Threshold warnings re-arm after quota recovers above a threshold and fire
+  on a later downward crossing. Predictive warnings and quota-low hooks keep their existing source-scoped histories;
+  their baselines are not merged with threshold notification state. OAuth/CLI samples without a warning owner use
+  one stable unresolved-account scope, so credential rewrites preserve threshold crossings and predictive warnings
+  remain available. When a stable account identity or verified owner binding becomes available, its threshold scope
+  adopts the newest unresolved history. Later identity gaps reuse the last known account when the reset timestamp
+  is unchanged and remaining quota has not increased. Without that continuity, samples use the stable unresolved
+  scope; once its history has joined an account, subsequent gaps preserve already-fired thresholds rather than
+  starting a new warning episode on every refresh. The first independent unresolved sample can still issue an
+  initial warning. Unverified credential owners remain independent; changing such an owner can still
+  produce an initial warning because account continuity cannot be established.
 - Successful OAuth login enables Claude and preserves the selected usage source. With the default Auto source, OAuth
   remains preferred when readable, while CLI/Web fallback stays available when OAuth credentials are not usable.
 - Claude Code periodically rotates its `Claude Code-credentials` Keychain item and can replace the ACL grant that
@@ -195,8 +262,9 @@ The accepted multi-account design in
   accounts the stacked menu switches to a compact layout (`AccountMenuLayoutPlanner`): the active account keeps its full
   card, inactive accounts become one-line rows sorted by remaining headroom (most constrained first, red/amber below
   50%/10% left, a star on the healthiest activatable account), and healthy rows fold behind a "N more accounts ready"
-  summary row. Clicking a compact row expands that account's full card for the current menu session; the summary row
-  reveals the hidden rows. `codexbar cards` keeps the full per-account output. The same compact layout applies to
+  summary row. Clicking a compact row expands that account's full card; clicking an inactive card collapses it again.
+  This choice is remembered locally across menu opens and app restarts. The summary row reveals the hidden rows for
+  the current menu session. `codexbar cards` keeps the full per-account output. The same compact layout applies to
   every stacked multi-account list (token accounts on any provider, and flat Codex account lists; workspace-grouped
   Codex lists keep their sectioned stacked layout). To use this
   presentation with one account, enable “Show account card when only one account is available” or set
@@ -204,6 +272,10 @@ The accepted multi-account design in
   `~/.config/codexbar/config.json`; legacy installs may use `~/.codexbar/config.json`). The option defaults off,
   zero accounts still use the ambient presentation, and account identity is `claude-swap:<slot>`, never the display
   email.
+- Provider widgets follow the active claude-swap account under the same multiple-account/single-account presentation
+  rule. Successful list refreshes and clearing the adapter publish a widget snapshot even with account widgets off.
+  Retained quota keeps its original measurement time and is bound to the slot's opaque owner fingerprint; unavailable
+  or replaced accounts never borrow another account's quota. Local cost history remains combined across Claude homes.
 - Terminal scope: this automatic precedence is cards-only and works on every supported CLI platform. An explicit
   Claude provider or `--source auto` remains eligible, while `--account`, `--account-index`, `--all-accounts`, and
   explicit non-auto source flags bypass the adapter. `codexbar usage` and serve `/usage`/`/cost` remain unchanged,
@@ -222,9 +294,15 @@ The accepted multi-account design in
   Fable) plus its reset time — not "Usage fetch failed." A first refresh that is already `unavailable` with no
   retained windows says usage is unavailable, without assuming why the source could not fetch it. Active rows are marked `[active]`; no claude-swap row infers
   a plan badge.
+- Read-only adapters may set top-level `supportsAccountSwitching: false` in their schema-v1 list response. Usage,
+  account details, and active markers remain visible, while switching and re-authentication actions are suppressed.
+  Omitting the capability preserves existing switching behavior; a present value must be a JSON boolean.
 - Switching: an inactive account with usable source credentials shows “Switch Account…”. Clicking it runs exactly
   `cswap --switch-to <slot> --json`, validates the versioned result and requested slot, then refreshes both ambient
   Claude usage and every claude-swap account card. Switches are serialized; no automatic switching occurs. While
+  reconciling, the ambient Claude refresh is given five seconds to finish; a stalled refresh continues in the
+  background while switching waits for the adapter's active-account list, so it cannot leave the account chips inert.
+  A later switch can refresh the adapter list even when its ambient refresh is queued behind an earlier probe. While
   claude-swap owns account presentation, the separate ambient OAuth action reads “Sign in with Claude Code…” and does
   not add or switch a claude-swap account.
 - Expired, missing, unknown, or Keychain-inaccessible credentials stay non-actionable. A failed switch remains visible
@@ -250,7 +328,8 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
 ## CLI PTY (fallback)
 - Runs `claude` in a PTY session (`ClaudeCLISession`).
 - Default behavior: exit after each probe; Debug → "Keep CLI sessions alive" keeps it running between probes.
-- Probe launches pass `--settings '{"remoteControlAtStartup":false}'` to avoid registering empty Remote Control sessions in claude.ai/code and the mobile app. This process-local override leaves the user's saved settings unchanged; Claude's managed-settings policy still applies.
+- Both PTY probes and the non-PTY `/usage` fallback pass `--settings '{"remoteControlAtStartup":false}'` to disable Remote Control startup for the probe process. This process-local override leaves the user's saved settings unchanged; Claude's managed-settings policy still applies.
+- A PTY timeout or usage-loading failure can trigger the non-PTY `/usage` fallback. Cancellation and rate limits stop the probe; a subscription-only notice from the fallback takes precedence over the original PTY failure.
 - Probe working directory: `~/Library/Application Support/CodexBar/ClaudeProbe` with local Claude settings that disable
   deep-link URL handler registration during headless probes.
 - After transient probes exit, CodexBar removes Claude Code `.jsonl` session artifacts for that dedicated
@@ -259,9 +338,13 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
   1) Start CLI with `--allowed-tools ""` (no tools).
   2) Auto-respond to first-run prompts (trust files, workspace, telemetry).
   3) Send `/usage`, wait for rendered panel; send Enter retries if needed.
-  4) Optionally send `/status` to extract identity fields.
+  4) Dismiss the open panel with Escape before reusing the session for `/status` identity or the next `/usage` refresh.
+  5) Optionally send `/status` to extract identity fields.
 - Parsing (`ClaudeStatusProbe`):
-  - Strips ANSI, locates "Current session" + "Current week" headers.
+  - Replays cursor-based `/usage` and `/status` captures onto a bounded screen with the same geometry as the PTY, then locates
+    "Current session" + "Current week" headers. Cursor jumps preserve unchanged cells from earlier frames, keeping
+    scoped weekly percentages, reset spacing, and account identity intact. Erased content is not reused as history.
+  - Plain reports, including color-only ANSI output and legacy CR-delimited text, retain their existing parsing behavior.
   - Extracts percent left/used and reset text near those headers.
   - When a reset date cannot be parsed, the menu preserves its description and normalizes leading `Reset` or `Resets` labels once, including scoped weekly limits.
   - Parses `Account:` and `Org:` lines when present.
@@ -275,6 +358,7 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
 - Source roots:
   - Native Claude logs:
     - `$CLAUDE_CONFIG_DIR` selects one literal directory and uses `<root>/projects`; commas are part of its path.
+    - Also includes claude-swap session profiles at `~/.claude-swap-backup/sessions/<slot>-<label>/projects`. On Linux, also checks `$XDG_DATA_HOME/claude-swap/sessions` (default `~/.local/share/claude-swap/sessions`). Discovery examines only immediate positive-numbered slot directories and their `projects` child; it does not read credentials or run cswap.
     - Fallback roots:
       - `~/.config/claude/projects`
       - `~/.claude/projects` (Claude Code and current Claude Desktop Code/Cowork CLI sessions)
@@ -291,6 +375,7 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
 - Parsing:
   - Native Claude logs parse lines with `type: "assistant"` and `message.usage`.
   - Uses per-model token counts (input, cache read/create, output).
+  - Oversized local token or cost values cannot crash history scanning. An overflowing token total stays unavailable while independent counts and finite dollar estimates remain visible; raw rows are retained for later repricing.
   - Deduplicates cumulative streaming chunks by `message.id + requestId`. When `requestId` is absent,
     exact, nonblank `sessionId + message.id` identifies repeated response snapshots. Distinct explicit request
     IDs and distinct fallback sessions remain separate. Rows without sufficient identity are counted individually.
@@ -299,13 +384,18 @@ Model-scoped weekly-window proof (synthetic data, no real accounts or credential
   - pi and OMP sessions attribute `anthropic` assistant usage to Claude and bucket it by assistant-turn timestamp, so a
     single pi-compatible session can contribute to multiple models/days.
   - Matching assistant entry IDs within the same session are counted once across roots; distinct turns are retained.
+  - Claude-swap history contributes to the combined Claude total, including when an explicit `$CLAUDE_CONFIG_DIR` is set. Shared-history symlinks are scanned once, copied responses use the same deduplication as native logs, and missing profile directories do not prevent other homes from contributing. Local cost records do not establish per-account attribution.
+- Quota-week menu cards reuse the immutable snapshot’s day projection, warmed in the background. New snapshots and changed bucket time zones rebuild it; reset observations and the current time remain live on every card build.
 - Cache:
   - GPT usage recorded through Claude Code uses the bundled OpenAI model's long-context boundary (272K for supported models), while retaining catalog rates. Uncached input and cache-read/create tokens all contribute to the prompt length. Saved reports are recalculated after pricing corrections without discarding retained Codex history.
   - Native provider cache: `~/Library/Caches/CodexBar/cost-usage/claude-v6.json`
   - Report memo: `~/Library/Caches/CodexBar/cost-usage/claude-v6.report-memo.json` stores source stamps and the daily report across launches. It is reused only while transcript inventory, cache/pricing artifacts, requested window, and report-semantics revision still match.
+  - Unchanged sources reuse the memo even when a menu refresh bypasses the scan debounce. Explicit rescans still reparse transcripts, but identical cache and report-memo content is not rewritten; an unchanged rebuild retains its previous scan timestamp. Existing artifacts may be rewritten once to establish deterministic key ordering. Changed transcripts or report metadata still replace the corresponding complete JSON artifacts.
+  - The app's Usage & Spend refresh uses `claude-history-v6.json` and its own report memo. The two app refreshes do not replace each other's retained rows or restart each other's transcript scans. Once both have established their windows, same-day append refreshes read changed tails once per cache.
+  - App memos record whether every file's rows were selected for their scan window. Older or externally replaced caches without that proof rebuild once, even if their stored bounds already match; app window changes also rebuild to preserve cold-scan duplicate selection. The regular cache filename and row schema remain compatible, and standalone CLI range behavior is unchanged.
   - The Claude/Vertex cache artifact retains source file identities independently of the shared Codex parser fingerprint. Replacing a transcript rebuilds its rows rather than merging an old prefix into a new suffix; genuine appends still use the saved parse offset. Older entries without identity are rebuilt once before reuse, including during the normal refresh debounce.
   - Older Claude/Vertex native caches and report memos are rebuilt once from unchanged transcripts to apply the corrected response deduplication. Corrected reports remain eligible for memo reuse across launches.
-  - pi-compatible session cache: `~/Library/Caches/CodexBar/cost-usage/pi-sessions-v8.json`
+  - pi-compatible session cache: `~/Library/Caches/CodexBar/cost-usage/pi-sessions-v9.json`. Version 8 rebuilds once from transcripts to establish source scope and completeness. Enabling the standalone [Pi provider](pi.md) keeps Claude history native-only in combined views.
 
 ## Key files
 - OAuth: `Sources/CodexBarCore/Providers/Claude/ClaudeOAuth/*`

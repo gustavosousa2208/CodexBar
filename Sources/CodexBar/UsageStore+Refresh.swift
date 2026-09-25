@@ -2,22 +2,6 @@ import CodexBarCore
 import Foundation
 
 extension UsageStore {
-    private struct ProviderRefreshOutcomeContext {
-        let generation: UInt64
-        let includesCredits: Bool
-        let claudeUsesConsumerAutoPipeline: Bool
-        let codexExpectedGuard: CodexAccountScopedRefreshGuard?
-        let tokenAccount: ProviderTokenAccount?
-        let priorTokenAccountSnapshot: TokenAccountUsageSnapshot?
-        let codexLimitResetOwnerKey: CodexLimitResetOwnerKey?
-        let claudeOAuthHistoryPersistentRefHash: String?
-        let claudeOAuthActiveAccountObservation: ClaudeOAuthActiveAccountObservation
-
-        var codexSessionQuotaOwnerKey: CodexSessionQuotaOwnerKey? {
-            UsageStore.codexSessionQuotaOwnerKey(for: self.codexExpectedGuard)
-        }
-    }
-
     private struct CodexRefreshPublicationPreparation {
         let expectedGuard: CodexAccountScopedRefreshGuard
         let limitResetOwnerKey: CodexLimitResetOwnerKey?
@@ -31,6 +15,7 @@ extension UsageStore {
         let disposition: ClaudeRefreshDisposition
         let oauthHistoryPersistentRefHash: String?
         let oauthActiveAccountObservation: ClaudeOAuthActiveAccountObservation
+        var credentialFingerprint: String?
     }
 
     private enum ClaudeRefreshDisposition {
@@ -55,26 +40,6 @@ extension UsageStore {
         let activeAccountIdentitySourceEligible: Bool
         let ownerCLIRecoveryPass: Bool
         let generation: UInt64
-    }
-
-    private static func warningAccountDiscriminator(
-        provider: UsageProvider,
-        tokenAccount: ProviderTokenAccount?,
-        result: ProviderFetchResult,
-        context: ProviderRefreshOutcomeContext) -> String?
-    {
-        if let tokenAccount {
-            return self.warningTokenAccountDiscriminator(tokenAccount)
-        }
-        // Provider-specific by design: Codex owner keys and Claude OAuth observations scope warning deduplication.
-        if provider == .codex {
-            return context.codexSessionQuotaOwnerKey?.rawValue
-        }
-        guard provider == .claude else { return nil }
-        return self.warningClaudeAccountDiscriminator(
-            strategyKind: result.strategyKind,
-            observation: context.claudeOAuthActiveAccountObservation,
-            oauthHistoryOwnerIdentifier: result.claudeOAuthHistoryOwnerIdentifier)
     }
 
     static func commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
@@ -341,7 +306,7 @@ extension UsageStore {
             await self.refreshCodexVisibleAccountsForMenu(generation: generation)
             return nil
         } else if provider == .codex {
-            self.codexAccountSnapshots = []
+            self.reconcileCodexWidgetAccountSnapshots()
         }
 
         if provider == .kilo, self.shouldFanOutKiloScopes() {
@@ -459,7 +424,8 @@ extension UsageStore {
             priorTokenAccountSnapshot: priorTokenAccountSnapshot,
             codexLimitResetOwnerKey: publishedCodexLimitResetOwnerKey,
             claudeOAuthHistoryPersistentRefHash: claudeReconciliation.oauthHistoryPersistentRefHash,
-            claudeOAuthActiveAccountObservation: claudeReconciliation.oauthActiveAccountObservation)
+            claudeOAuthActiveAccountObservation: claudeReconciliation.oauthActiveAccountObservation,
+            claudeCredentialFingerprint: claudeReconciliation.credentialFingerprint)
         return await self.completeProviderRefreshPass(
             provider: provider,
             outcome: outcome,
@@ -506,10 +472,12 @@ extension UsageStore {
             break
         }
         guard self.isCurrentProviderRefreshGeneration(provider, generation: context.generation) else { return nil }
-        await self.applyProviderRefreshOutcome(
+        await self.applyProviderRefreshOutcome(provider: provider, outcome: outcome, context: context)
+        self.scheduleSupplementalUsageUpdate(
             provider: provider,
             outcome: outcome,
-            context: context)
+            generation: context.generation,
+            accountID: context.tokenAccount?.id)
         return nil
     }
 
@@ -624,7 +592,10 @@ extension UsageStore {
         return ClaudeRefreshReconciliation(
             disposition: disposition,
             oauthHistoryPersistentRefHash: persistentRefHash,
-            oauthActiveAccountObservation: activeAccountObservation)
+            oauthActiveAccountObservation: activeAccountObservation,
+            credentialFingerprint: historyAccountState.wasStable &&
+                input.beforeFetch?.fingerprintToken == fingerprintAfterFetch && fingerprintAfterFetch != "none"
+                ? fingerprintAfterFetch : nil)
     }
 
     private func applyProviderRefreshOutcome(
@@ -705,26 +676,8 @@ extension UsageStore {
             let allowanceCurrent = self.resolvingCurrentCopilotAllowance(in: accountScoped, provider: provider)
             let backfilled = self.preparePublishedSnapshot(
                 allowanceCurrent, provider: provider, resetBackfillSource: resetBackfillSource, context: context)
-            let warningAccountDiscriminator = Self.warningAccountDiscriminator(
-                provider: provider,
-                tokenAccount: currentTokenAccount,
-                result: result,
-                context: context)
-            self.handleQuotaWarningTransitions(
-                provider: provider,
-                snapshot: backfilled,
-                accountDiscriminator: warningAccountDiscriminator)
-            self.handleSessionQuotaTransition(
-                provider: provider,
-                snapshot: backfilled,
-                codexOwnerKey: provider == .codex ? context.codexSessionQuotaOwnerKey : nil)
-            self.handlePredictivePaceWarningTransitions(
-                provider: provider,
-                snapshot: backfilled,
-                accountDiscriminatorOverride: provider == .claude ? warningAccountDiscriminator : nil)
-            if provider == .codex {
-                self.handleCodexResetCreditNotifications(snapshot: backfilled)
-            }
+            let warningAccount = self.handleProviderRefreshNotifications(
+                provider: provider, result: result, snapshot: backfilled, context: context)
             self.lastKnownResetSnapshots[provider.instanceID] = backfilled
             self.snapshots[provider.instanceID] = backfilled
             self.widgetUsagePreservationBlockedProviders.remove(provider.instanceID)
@@ -765,6 +718,7 @@ extension UsageStore {
                 backfilled: backfilled,
                 result: result,
                 context: context)
+            self.emitUsageUpdatedHook(provider: provider, snapshot: backfilled, rateKey: warningAccount)
             return backfilled
         }
         guard let backfilled else { return }
@@ -835,10 +789,24 @@ extension UsageStore {
         if provider == .deepseek {
             self.markDeepSeekProfileTransitionUnavailable()
         }
+        self.handleCredentialOutcome(
+            provider: provider,
+            account: self.credentialAccount(provider: provider, context: context),
+            result: .failure(error))
         self.bindCodexFailurePublicationOwner(
             provider: provider,
             expectedGuard: context.codexExpectedGuard)
+        if provider == .codex {
+            self.reconcileCodexWidgetAccountSnapshots(after: error)
+        }
         self.lastFetchAttempts[provider.instanceID] = attempts
+        if !Self.shouldPreservePriorSnapshot(
+            after: error,
+            hadPriorData: true,
+            priorSnapshot: self.snapshots[provider.instanceID] ?? self.lastKnownResetSnapshots[provider.instanceID])
+        {
+            self.invalidateGenericWidgetUsage(for: provider)
+        }
         self.recordStartupConnectivityRetryableFailure(error)
         await self.handleProviderFetchFailure(
             provider: provider,
@@ -1311,7 +1279,8 @@ extension UsageStore {
     }
 
     private func clearClaudeCredentialDerivedStateForCredentialSwap() {
-        // Provider-specific by design: retire Claude projections but preserve known accounts' warning episodes.
+        // Provider-specific by design: retire Claude projections but preserve scoped warning episodes, including
+        // unresolved accounts.
         self.widgetUsagePreservationBlockedProviders.insert(.claude)
         self.snapshots.removeValue(forKey: .claude)
         self.lastKnownResetSnapshots.removeValue(forKey: .claude)
@@ -1593,28 +1562,5 @@ extension UsageStore {
             ClaudeWebAPIFetcher.FetchError.unauthorized.localizedDescription,
             ClaudeWebAPIFetcher.FetchError.cloudflareChallenge.localizedDescription,
         ].contains(error.localizedDescription)
-    }
-
-    nonisolated static func isPermissionPromptWaiting(_ error: Error) -> Bool {
-        let message = error.localizedDescription.lowercased()
-        return (message.contains("prompt") && message.contains("waiting")) ||
-            message.contains("permission prompt") ||
-            message.contains("folder trust prompt")
-    }
-
-    private func postPermissionPromptNotificationIfNeeded(provider: UsageProvider, error: Error) {
-        let now = Date()
-        if let last = self.lastPermissionPromptNotificationAt[provider.instanceID],
-           now.timeIntervalSince(last) < 10 * 60
-        {
-            return
-        }
-        self.lastPermissionPromptNotificationAt[provider.instanceID] = now
-        let providerName = ProviderDescriptorRegistry.descriptor(for: provider).metadata.displayName
-        AppNotifications.shared.post(
-            idPrefix: "permission-prompt-\(provider.rawValue)",
-            title: L("%@ is waiting for permission", providerName),
-            body: error.localizedDescription,
-            soundEnabled: false)
     }
 }

@@ -5,8 +5,21 @@ import Testing
 
 @Suite(.serialized)
 struct DevinOrganizationGuidanceTests {
+    @Test(arguments: [DevinUsageError.noSession, .browserStorageUnreadable, .invalidCredentials])
+    func `session errors explain manual setup in CLI output`(_ error: DevinUsageError) {
+        let output = CLICardsRenderer.render(
+            cards: [],
+            failures: [.init(provider: .devin, accountLabel: nil, message: error.localizedDescription)],
+            terminalWidth: 100,
+            useColor: false)
+
+        #expect(output.contains("~/.config/codexbar/config.json"))
+        #expect(output.contains("cookieSource=manual"))
+        #expect(output.contains("docs/devin.md#manual-auth"))
+    }
+
     private static let guidance =
-        "No Devin organization was found. For automatic auth, open the organization's Usage page in Chrome. " +
+        "No Devin organization was found. For automatic auth, open the organization's Usage page in your browser. " +
         "For manual auth, set Organization to the internal org-... or org_... ID from a successful quota " +
         "request's x-cog-org-id header."
 

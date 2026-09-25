@@ -9,13 +9,24 @@ extension AntigravityLocalReader {
     static func readDatabases(_ paths: [URL], budget: Budget) throws -> SourceResult {
         var result = SourceResult()
         for url in paths {
-            try budget.check()
-            budget.statistics.files += 1
-            guard budget.statistics.files <= budget.limits.databases else { throw ScanFailure.exhausted }
-            let source = try self.readDatabase(url, budget: budget)
-            result.events.append(contentsOf: source.events)
-            result.isComplete = result.isComplete && source.isComplete
-            result.containsHistorySource = result.containsHistorySource || source.containsHistorySource
+            do {
+                try budget.check()
+                budget.statistics.files += 1
+                guard budget.statistics.files <= budget.limits.databases else { throw ScanFailure.exhausted }
+                let source = try self.readDatabase(url, budget: budget)
+                result.events.append(contentsOf: source.events)
+                result.isComplete = result.isComplete && source.isComplete
+                result.containsHistorySource = result.containsHistorySource || source.containsHistorySource
+                result.evidenceIsUnstable = result.evidenceIsUnstable || source.evidenceIsUnstable
+            } catch ScanFailure.schemaExhausted {
+                // Schema-budget exhaustion is a soft limit: preserve rows already decoded from earlier
+                // databases. They are valid partial history and are more useful than an empty result when
+                // a large history tree hits the cumulative schema-byte cap. Hard row, byte, and duration
+                // limits are not caught here and continue to withhold newly truncated reports as documented.
+                guard !result.events.isEmpty else { throw ScanFailure.schemaExhausted }
+                result.isComplete = false
+                break
+            }
         }
         return result
     }
@@ -84,6 +95,7 @@ extension AntigravityLocalReader {
         // its sidecar state are unchanged afterwards. Anything else stays incomplete, as before.
         guard self.idleDatabaseState(url) == before else {
             source.isComplete = false
+            source.evidenceIsUnstable = true
             return source
         }
         return source
@@ -421,7 +433,7 @@ extension AntigravityLocalReader {
             let attemptedBytes = max(count, payload.byteCount)
             try progress.budget.chargeBytes(attemptedBytes)
             guard attemptedBytes <= progress.budget.limits.databaseBytes - progress.databaseBytes
-            else { break }
+            else { throw ScanFailure.exhausted }
             progress.databaseBytes += attemptedBytes
             guard count > 0, count <= progress.budget.limits.blobBytes,
                   sqlite3_column_type(statement, 0) == SQLITE_INTEGER,

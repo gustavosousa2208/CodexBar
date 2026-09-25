@@ -34,6 +34,7 @@ enum CodexBarEntryPoint {
         guard CodexBarLaunchMode.resolve(arguments: CommandLine.arguments) == .application else {
             return
         }
+        TerminalLauncher().cleanUpAbandonedConfigs()
         CodexBarApp.main()
     }
 }
@@ -45,7 +46,6 @@ struct CodexBarApp: App {
     @State private var managedCodexAccountCoordinator: ManagedCodexAccountCoordinator
     @State private var codexAccountPromotionCoordinator: CodexAccountPromotionCoordinator
     private let preferencesSelection: PreferencesSelection
-    private let account: AccountInfo
 
     init() {
         let env = ProcessInfo.processInfo.environment
@@ -97,7 +97,6 @@ struct CodexBarApp: App {
         _store = State(wrappedValue: store)
         _managedCodexAccountCoordinator = State(wrappedValue: managedCodexAccountCoordinator)
         _codexAccountPromotionCoordinator = State(wrappedValue: codexAccountPromotionCoordinator)
-        self.account = account
         CodexBarLog.setLogLevel(settings.debugLogLevel)
         self.appDelegate.configure(.init(
             store: store,
@@ -124,6 +123,13 @@ struct CodexBarApp: App {
                     self.appDelegate.openSettings(pane: nil)
                 }
                 .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandGroup(replacing: .help) {
+                Button(L("CodexBar Help")) {
+                    guard let url = URL(string: "https://github.com/steipete/CodexBar/blob/main/README.md")
+                    else { return }
+                    NSWorkspace.shared.open(url)
+                }
             }
         }
     }
@@ -187,7 +193,7 @@ final class DisabledUpdaterController: UpdaterProviding {
     static func homebrew() -> DisabledUpdaterController {
         let command = ManualUpdateCommand.homebrew
         return DisabledUpdaterController(
-            unavailableReason: "Updates managed by Homebrew. Run: \(command.command)",
+            unavailableReason: L("Managed by Homebrew"),
             manualUpdateCommand: command)
     }
 

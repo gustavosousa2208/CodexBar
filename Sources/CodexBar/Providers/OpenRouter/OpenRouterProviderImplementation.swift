@@ -25,10 +25,8 @@ struct OpenRouterProviderImplementation: ProviderImplementation {
 
     @MainActor
     func isAvailable(context: ProviderAvailabilityContext) -> Bool {
-        if OpenRouterSettingsReader.apiToken(environment: context.environment) != nil {
-            return true
-        }
-        return !context.settings[providerConfig: .openrouter, field: .apiKey]
+        OpenRouterSettingsReader.apiToken(environment: context.environment) != nil ||
+            !context.settings[providerConfig: .openrouter, field: .apiKey]
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -38,8 +36,8 @@ struct OpenRouterProviderImplementation: ProviderImplementation {
             ProviderSettingsFieldDescriptor(
                 id: "openrouter-api-key",
                 title: "API key",
-                subtitle: "Stored in your CodexBar config. Shows spend for this key. "
-                    + "Get your key from openrouter.ai/settings/keys; a spending limit enables quota tracking.",
+                subtitle: "Required. Enter a regular API key or a Management API key here. "
+                    + "Management keys also enable account Activity on the official OpenRouter API.",
                 kind: .secure,
                 placeholder: "sk-or-v1-...",
                 binding: context.providerConfigBinding(.apiKey),
@@ -57,7 +55,9 @@ struct OpenRouterProviderImplementation: ProviderImplementation {
             ProviderSettingsFieldDescriptor(
                 id: "openrouter-management-api-key",
                 title: "Management API key",
-                subtitle: "Optional. Enables exact 30-day Activity spend.",
+                subtitle: "Optional additional key for account Activity. "
+                    + "Only needed to use a separate Management API key "
+                    + "from the one in the required API key field above.",
                 kind: .secure,
                 placeholder: "sk-or-v1-...",
                 binding: context.providerConfigSecretBinding(

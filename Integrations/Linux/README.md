@@ -119,6 +119,12 @@ auto-updater or distro repository package yet. Ordinary CI artifacts are
 previews, not releases. See [validation and removal](#validation-and-removal)
 for uninstall paths.
 
+Managed configuration symlinks are preserved: the installer updates their targets
+for preferences, launcher entries, autostart, and the Omarchy layout. JSON remains
+UTF-8, including existing glyphs. Installed binaries and icons replace links at
+their destination; existing Omarchy adapter links, including dangling links, are
+archived before the new adapter is installed.
+
 ## Build and install
 
 Requires Linux, C++17, make, qmake6, and Qt 6.4 or newer: Base, Declarative/Quick,
@@ -151,9 +157,11 @@ python3 Integrations/Linux/install.py --cli /absolute/path/to/codexbar --omarchy
 
 To create an archive from a local build, run
 `python3 Integrations/Linux/package.py --version 0.1.0`. The archive contains only
-the app, installer, icon, adapter, license, and instructions. It needs compatible
+the app, installer, icons, adapter, license, and instructions. The Omarchy adapter
+includes the provider SVG logos already shipped by the Mac app. It needs compatible
 system Qt/glibc libraries and a separately installed CodexBar CLI; it is not an
 AppImage or a distro-native package. Build on the oldest distro you intend to support.
+The executable is resolved before packaging, so `--binary` may point to a symlink.
 
 Qt supports Wayland and X11. The tray uses Qt's desktop integration (StatusNotifier
 or X11 tray host). GNOME may require a tray extension; the launcher and windows
@@ -228,9 +236,19 @@ start one when needed. IPC clients load no GUI plugin. `--cli PATH` and `--no-tr
 apply when starting a new instance. The private, same-user local socket lives at
 `$XDG_RUNTIME_DIR/codexbar-linux/desktop.sock`; requests and replies are newline
 terminated JSON. Snapshot schema version 1 includes compact provider windows,
-summary, update time, busy/stale/error state, and spending availability. It excludes account identity, CLI paths, and credential configuration.
+summary, update time, busy/stale/error state, and spending availability. `barEntries`
+contains `{provider, tag, text}` for the same first two entries shown in `summary`,
+with quota text already formatted for the used/remaining preference. Adapters may
+replace the tag with a local logo and count additional `entries` as `+N`; older
+backends omit this field, so adapters should fall back to `summary`.
+The snapshot excludes account identity, CLI paths, and credential configuration.
 It includes display values and reset text for adapters. Adapters should check `schemaVersion`, tolerate
 unknown fields, and treat a missing backend as unavailable.
+Measured provider-scoped windows follow the standard windows and require a stable, nonempty identifier.
+Their exported `key` values are opaque and remain stable for the lifetime of the backend process.
+Antigravity quota-summary buckets appear once with their family titles. Each family's
+most constrained bucket keeps its leading position for tray meters and summary text;
+its key and alert history stay with the bucket when a different bucket leads.
 
 ## Validation and removal
 

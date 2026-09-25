@@ -4,13 +4,12 @@ import Foundation
 import SweetCookieKit
 
 public enum KimiCookieImporter {
-    public static func desktopAuthToken() -> String? {
-        KimiDesktopAuthToken.load()
+    public static func desktopAuthToken(region: KimiRegion = .china) -> String? {
+        KimiDesktopAuthToken.load(region: region)
     }
 
     private static let log = CodexBarLog.logger(LogCategories.provider(.kimi, scope: "cookie"))
     private static let cookieClient = BrowserCookieClient()
-    private static let cookieDomains = ["www.kimi.com", "kimi.com"]
     private static let cookieImportOrder: BrowserCookieImportOrder =
         ProviderDefaults.metadata[.kimi]?.browserCookieOrder ?? Browser.defaultImportOrder
 
@@ -29,6 +28,7 @@ public enum KimiCookieImporter {
     }
 
     public static func importSessions(
+        region: KimiRegion = .china,
         browserDetection: BrowserDetection = BrowserDetection(),
         logger: ((String) -> Void)? = nil) throws -> [SessionInfo]
     {
@@ -36,7 +36,7 @@ public enum KimiCookieImporter {
         let candidates = self.cookieImportOrder.cookieImportCandidates(using: browserDetection)
         for browserSource in candidates {
             do {
-                let perSource = try self.importSessions(from: browserSource, logger: logger)
+                let perSource = try self.importSessions(from: browserSource, region: region, logger: logger)
                 sessions.append(contentsOf: perSource)
             } catch {
                 BrowserCookieAccessGate.recordIfNeeded(error)
@@ -54,40 +54,55 @@ public enum KimiCookieImporter {
 
     public static func importSessions(
         from browserSource: Browser,
+        region: KimiRegion = .china,
         logger: ((String) -> Void)? = nil) throws -> [SessionInfo]
     {
-        let query = BrowserCookieQuery(domains: self.cookieDomains)
+        let query = BrowserCookieQuery(domains: region.cookieDomains, domainMatch: .exact)
         let log: (String) -> Void = { msg in self.emit(msg, logger: logger) }
         let sources = try Self.cookieClient.codexBarRecords(
             matching: query,
             in: browserSource,
             logger: log)
 
-        var sessions: [SessionInfo] = []
-
-        for profile in BrowserCookieProfiles.merge(sources) {
-            let label = profile.label
-            let mergedRecords = profile.records
-            guard !mergedRecords.isEmpty else { continue }
-            let httpCookies = BrowserCookieClient.makeHTTPCookies(mergedRecords, origin: query.origin)
-            guard !httpCookies.isEmpty else { continue }
-
-            // Only include sessions that have the kimi-auth cookie
-            guard httpCookies.contains(where: { $0.name == "kimi-auth" }) else {
-                continue
-            }
-
-            log("Found kimi-auth cookie in \(label)")
-            sessions.append(SessionInfo(cookies: httpCookies, sourceLabel: label))
+        return BrowserCookieProfiles.merge(sources).compactMap { profile in
+            let cookies = BrowserCookieClient.makeHTTPCookies(profile.records, origin: query.origin)
+            guard cookies.contains(where: { $0.name == "kimi-auth" }) else { return nil }
+            log("Found kimi-auth cookie in \(profile.label)")
+            return SessionInfo(cookies: cookies, sourceLabel: profile.label)
         }
-        return sessions
+    }
+
+    static func localStorageTokens(
+        region: KimiRegion,
+        browserDetection: BrowserDetection = BrowserDetection(),
+        localStorage: BrowserLocalStorageAPI = .live,
+        now: Date = Date()) -> [String]
+    {
+        var seen = Set<String>()
+        return localStorage.profiles(
+            for: region.webBaseURL.absoluteString,
+            browsers: ChromiumLocalStorageDiscovery.defaultBrowsers,
+            using: browserDetection,
+            logger: { Self.log.debug($0) })
+            .flatMap(\.entries).compactMap { entry in
+                guard entry.key == "access_token" else { return nil }
+                let token = (try? JSONDecoder().decode(String.self, from: Data(entry.value.utf8)))
+                    ?? entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard token.split(separator: ".", omittingEmptySubsequences: false).count == 3,
+                      token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) }),
+                      let expiry = UsageFetcher.parseJWT(token)?["exp"] as? Double,
+                      expiry.isFinite, expiry > now.timeIntervalSince1970,
+                      seen.insert(token).inserted else { return nil }
+                return token
+            }
     }
 
     public static func importSession(
+        region: KimiRegion = .china,
         browserDetection: BrowserDetection = BrowserDetection(),
         logger: ((String) -> Void)? = nil) throws -> SessionInfo
     {
-        let sessions = try self.importSessions(browserDetection: browserDetection, logger: logger)
+        let sessions = try self.importSessions(region: region, browserDetection: browserDetection, logger: logger)
         guard let first = sessions.first else {
             throw KimiCookieImportError.noCookies
         }
@@ -95,19 +110,15 @@ public enum KimiCookieImporter {
     }
 
     public static func hasSession(
+        region: KimiRegion = .china,
         browserDetection: BrowserDetection = BrowserDetection(),
         logger: ((String) -> Void)? = nil) -> Bool
     {
         do {
-            return try !self.importSessions(browserDetection: browserDetection, logger: logger).isEmpty
+            return try !self.importSessions(region: region, browserDetection: browserDetection, logger: logger).isEmpty
         } catch {
             return false
         }
-    }
-
-    private static func cookieNames(from cookies: [HTTPCookie]) -> String {
-        let names = Set(cookies.map { "\($0.name)@\($0.domain)" }).sorted()
-        return names.joined(separator: ", ")
     }
 
     private static func emit(_ message: String, logger: ((String) -> Void)?) {

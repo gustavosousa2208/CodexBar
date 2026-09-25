@@ -618,6 +618,9 @@ extension StatusItemController {
                     spendSummary.provenanceText,
                 ].joined(separator: "|"))
             menu.addItem(summaryItem)
+            if let shareItem = self.makeOverviewShareStatsMenuItem(model: spendModel) {
+                menu.addItem(shareItem)
+            }
             menu.addItem(.separator())
         }
 
@@ -629,13 +632,20 @@ extension StatusItemController {
                 model: row.model,
                 width: menuWidth)
             let item = self.makeMenuCardItem(
-                OverviewMenuCardRowView(model: row.model, storageText: storageText, width: menuWidth),
+                OverviewMenuCardRowView(
+                    model: row.model,
+                    storageText: storageText,
+                    width: menuWidth,
+                    layout: self.settings.mergedOverviewLayout),
                 id: identifier,
                 width: menuWidth,
                 heightCacheScope: row.provider.rawValue,
                 heightCacheFingerprint: row.model.heightFingerprint(
                     section: "overview",
-                    additional: [UsageMenuCardView.Model.heightFingerprintField("storage", storageText)]),
+                    additional: [
+                        UsageMenuCardView.Model.heightFingerprintField("storage", storageText),
+                        "layout=\(self.settings.mergedOverviewLayout.rawValue)",
+                    ]),
                 submenu: submenu,
                 containsInteractiveControls: row.model.subtitleStyle == .error || row.model.usesLiveSubtitle,
                 usesGPUSelection: true,
@@ -978,6 +988,9 @@ extension StatusItemController {
             self.menuAppearanceObserver = StatusMenuAppearanceObserver(controller: self)
         }
         let menu = StatusItemMenu()
+        menu.switcherShortcuts = { [weak self] in self?.settings.providerSwitcherShortcuts
+            ?? ProviderSwitcherShortcuts.defaults
+        }
         menu.autoenablesItems = false
         menu.delegate = self
         menu.persistentActionDelegate = self
@@ -1115,11 +1128,10 @@ extension StatusItemController {
                     allowDisabled: true,
                     phaseDidChange: { [weak controller, weak menu, settings] _ in
                         guard let controller, let menu else { return }
-                        guard settings.codexVisibleAccountProjection.activeVisibleAccountID == visibleAccountID
-                        else {
-                            return
+                        // Recheck account ownership when scheduling and when the tracking-safe rebuild runs.
+                        controller.scheduleOpenRootMenuDataRebuildIfStillVisible(menu, provider: .codex) {
+                            settings.codexVisibleAccountProjection.activeVisibleAccountID == visibleAccountID
                         }
-                        controller.refreshOpenMenuIfStillVisible(menu, provider: .codex)
                     })
             }
         }
@@ -1484,8 +1496,11 @@ extension StatusItemController {
     private func addCostHistorySubmenu(to menu: NSMenu, provider: UsageProvider) -> Bool {
         guard let submenu = self.makeCostHistorySubmenu(provider: provider, width: self.renderedMenuWidth(for: menu))
         else { return false }
-        let days = self.store.settings.costUsageHistoryDays
-        let title = days == 1 ? L("Usage history (today)") : String(format: L("Usage history (%d days)"), days)
+        let title: String = switch self.store.settings.costReportingPeriod {
+        case .rolling(1): L("Usage history (today)")
+        case let .rolling(days): String(format: L("Usage history (%d days)"), days)
+        case let period: "\(L("cost_history_window_title")) (\(L(period.label)))"
+        }
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = true
         item.submenu = submenu

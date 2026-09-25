@@ -213,6 +213,9 @@ struct DashboardSnapshotContext: Sendable {
 }
 
 private struct ServeCostContext: Sendable {
+    let period: CostReportingPeriod
+    let now: Date
+    let calendar: Calendar
     let config: CodexBarConfig
     let collection: ServeCostCollectionContext
 }
@@ -930,6 +933,11 @@ extension CodexBarCLI {
             guard !runtime.dataRoutesRequireAuth || runtime.dashboardAuth.authorize(request) else {
                 return Self.serveUnauthorizedResponse()
             }
+            let now = Date()
+            let period = Self.costReportingPeriodFromDefaults()
+            let calendar = CostUsageBucketTimeZone.calendar(
+                identifier: Self.stringFromAppDefaults("tokenCostUsageBucketTimeZone"))
+            let periodIdentity = period.identity(now: now, calendar: calendar)
             let snapshot: CLIServeConfigSnapshot
             let operationKey: String
             do {
@@ -942,7 +950,7 @@ extension CodexBarCLI {
             return await Self.addingNoStore(Self.cachedServeResponse(
                 request: ServeResponseRequest(
                     key: operationKey,
-                    configFingerprint: snapshot.cacheToken,
+                    configFingerprint: snapshot.cacheToken + periodIdentity,
                     refreshInterval: runtime.refreshInterval,
                     deadline: requestDeadline,
                     allowsStaleWhileRevalidate: true),
@@ -951,9 +959,12 @@ extension CodexBarCLI {
                     await Self.serveCost(
                         provider: provider,
                         context: ServeCostContext(
+                            period: period,
+                            now: now,
+                            calendar: calendar,
                             config: snapshot.config,
                             collection: ServeCostCollectionContext(
-                                configFingerprint: snapshot.cacheToken,
+                                configFingerprint: snapshot.cacheToken + periodIdentity,
                                 providerTimeout: providerTimeout,
                                 requestDeadline: requestDeadline,
                                 now: { ContinuousClock().now },
@@ -1489,7 +1500,10 @@ extension CodexBarCLI {
                 message: "cost is only supported for \(Self.costSupportedProviderNames())")
         }
 
-        let fetcher = CostUsageFetcher()
+        let fetcher = CostUsageFetcher(calendar: context.calendar)
+        let piSessionProcessContexts = await Self.piSessionProcessContextsForCost(
+            providers: providers,
+            includePiSessions: true)
         let payload = await Self.collectConfiguredCostPayloads(
             providers: providers,
             config: context.config,
@@ -1498,10 +1512,23 @@ extension CodexBarCLI {
             do {
                 let snapshot = try await fetcher.loadTokenSnapshot(
                     provider: provider,
+                    now: context.now,
                     forceRefresh: false,
+                    historyDays: context.period.days(now: context.now, calendar: context.calendar),
                     cursorCookieHeaderOverride: cursorCookieHeaderOverride,
-                    refreshPricingInBackground: Self.serveCostRefreshesPricingInBackground)
-                return Self.makeCostPayload(provider: provider, snapshot: snapshot, error: nil)
+                    refreshPricingInBackground: Self.serveCostRefreshesPricingInBackground,
+                    includePiSessions: Self.costIncludePiSessions(
+                        provider: provider,
+                        selectedProviders: providers,
+                        groupBy: .none,
+                        format: .json,
+                        includePiSessions: true),
+                    piSessionProcessContexts: piSessionProcessContexts).reporting(context.period)
+                return Self.makeCostPayload(
+                    provider: provider,
+                    snapshot: snapshot,
+                    error: nil,
+                    calendar: context.calendar)
             } catch {
                 return Self.makeCostPayload(provider: provider, snapshot: nil, error: error)
             }
@@ -1552,6 +1579,9 @@ extension CodexBarCLI {
     {
         // Preserve the established scan order. The injected fetch decides whether
         // pricing refresh is awaited; provider deadlines still bound each row.
+        // Provider-specific by design: the same provider may be requested once as
+        // an inclusive Claude/Codex row and once as native-only when Pi is emitted
+        // separately. Keep those operations from coalescing under one config key.
         var payload: [CostPayload] = []
         for provider in providers {
             let deadline = Self.serveCostProviderDeadline(
@@ -1562,9 +1592,17 @@ extension CodexBarCLI {
                 provider: provider,
                 snapshot: nil,
                 error: CLIServeCostTimeoutError(provider: provider))
+            let includesPi = Self.costIncludePiSessions(
+                provider: provider,
+                selectedProviders: providers,
+                groupBy: .none,
+                format: .json,
+                includePiSessions: true)
+            let mode = includesPi ? "inclusive" : "native"
+            let operationFingerprint = "\(context.configFingerprint)|piAccounting=\(provider.rawValue):\(mode)"
             let item = await context.providerOperations.value(
                 for: provider.rawValue,
-                fingerprint: context.configFingerprint,
+                fingerprint: operationFingerprint,
                 deadline: deadline,
                 timeoutValue: timeout)
             {

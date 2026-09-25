@@ -44,6 +44,9 @@ The request sends the resolved Perplexity session cookie, `Origin: https://www.p
 
 Automatic mode tries any cached Perplexity cookie first, then imports browser cookies, then falls back to environment
 variables. Browser-imported cookies are cached and invalid cached cookies are cleared after a rejected request.
+The bundled JavaScript provider owns fetching and credit parsing on QuickJS and JavaScriptCore. It retries the four
+supported cookie names for a bare token, assembles numbered session-cookie chunks, and advances through browser
+profiles after rejected credentials. Manual mode stays exclusive and never falls back to an environment token.
 
 ## Display
 
@@ -55,6 +58,8 @@ variables. Browser-imported cookies are cached and invalid cached cookies are cl
 The menu-bar percent picker can explicitly show **Credits** or **Bonus credits**, including when the API reports no duration. These choices use the actual credit pools without inventing a session or weekly cadence. Automatic keeps the existing recurring → purchased → bonus consumption order.
 
 Purchased and bonus credits do not reset, so their balances remain details in menus and CLI output. Layout reset-time tokens require an actual reset date for credit-detail windows; amounts never stand in for a reset clock.
+
+Large finite credit counts retain their whole-number descriptions; nonfinite aggregate counts omit the description.
 
 ## CLI Usage
 
@@ -81,7 +86,7 @@ account has visible credit data.
 ## Related Files
 
 - `Sources/CodexBarCore/Providers/Perplexity/PerplexityProviderDescriptor.swift`
-- `Sources/CodexBarCore/Providers/Perplexity/PerplexityUsageFetcher.swift`
-- `Sources/CodexBarCore/Providers/Perplexity/PerplexityUsageSnapshot.swift`
+- `Sources/CodexBarCore/Resources/Plugins/perplexity.js`
+- `Sources/CodexBarCore/Plugins/ProviderPluginCookieBroker.swift`
 - `Sources/CodexBarCore/Providers/Perplexity/PerplexityCookieHeader.swift`
 - `Sources/CodexBar/Providers/Perplexity/PerplexityProviderImplementation.swift`

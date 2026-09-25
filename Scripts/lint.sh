@@ -53,6 +53,10 @@ check_package_info_plist() {
   "${ROOT_DIR}/Scripts/test_package_info_plist.sh"
 }
 
+check_packaged_app_launch() {
+  python3 "${ROOT_DIR}/Scripts/test_packaged_app_launch.py"
+}
+
 check_cli_installer() {
   /bin/bash "${ROOT_DIR}/Scripts/test_install_codexbar_cli.sh"
 }
@@ -63,6 +67,10 @@ check_release_dsym_paths() {
 
 check_release_checksum() {
   "${ROOT_DIR}/Scripts/test_release_checksum.sh"
+}
+
+check_release_assets() {
+  python3 "${ROOT_DIR}/Scripts/test_check_release_assets.py"
 }
 
 check_sparkle_signing_paths() {
@@ -111,6 +119,7 @@ check_app_locales() {
 }
 
 check_site_locales() {
+  node --test "${ROOT_DIR}/Scripts/test_social_card.mjs"
   node "${ROOT_DIR}/Scripts/check-site-locales.mjs"
   node --check "${ROOT_DIR}/docs/site.js"
 }
@@ -131,8 +140,10 @@ run_portable_checks() {
   check_package_strip
   check_package_signing
   check_package_info_plist
+  check_packaged_app_launch
   check_release_dsym_paths
   check_release_checksum
+  check_release_assets
   check_sparkle_signing_paths
   check_swift_static_sdk_installer
   check_mimo_usage_script

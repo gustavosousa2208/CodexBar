@@ -80,6 +80,13 @@ actor CostUsageStore {
         parserHash: CodexParserHash.value)
     static let cacheGeneration = "sqlite:\(CostUsageStore.schemaVersion)"
     static let compatiblePredecessorParserHashes: Set<String> = [
+        "9972dad7f7aeff21", // Direct-fork baseline corrections use bounded parser-revision migration.
+        "4dd9e5769818370a", // Linux Priority trace support preserves native rows and checkpoints.
+        "03e43d1217789d16", // Fork baseline corrections use bounded native parser-revision migration.
+        "50813ce2a3edfdc7", // 0.63.0 native history is unchanged by Claude-only numeric guards.
+        "865a444e01b818f1", // 0.62.0 history survives bounded parser-revision migration.
+        "6a4df886696f4ab5", // Temporal reports preserve native rows and scan checkpoints.
+        "6d48baf0ed980828", // Source-backed row recovery preserves native history and scan checkpoints.
         "c2ac37e84074d2b2", // Native rows are unchanged by Claude completion metadata.
         "710f475c3d1cfb61", // 0.60.4 native rows and checkpoints are unchanged by Claude pricing corrections.
         "aa57b010b3c0bee4", // Provider-aware pricing preserves native rows and scan checkpoints.
@@ -156,6 +163,7 @@ actor CostUsageStore {
     private var failureGeneration = UUID()
     var retainedCodexBaseline: RetainedCodexBaseline?
     var retainedCodexRead: RetainedCodexRead?
+    var retainedCodexScan: CodexDecodedBaseline?
     #if DEBUG
     var codexBaselineReleaseObserverForTesting: (@Sendable () -> Void)?
     #endif
@@ -421,6 +429,7 @@ extension CostUsageStore {
     func recoverConnectionAfterFailure() {
         self.retainedCodexBaseline = nil
         self.retainedCodexRead = nil
+        self.retainedCodexScan = nil
         self.failureGeneration = UUID()
         guard let handle = self.connection?.handle else { return }
         if sqlite3_get_autocommit(handle) == 0,
@@ -500,6 +509,7 @@ extension CostUsageStore {
             if sqlite3_total_changes64(database) != changes {
                 self.retainedCodexBaseline = nil
                 self.retainedCodexRead = nil
+                self.retainedCodexScan = nil
             } else if let retained = self.retainedCodexBaseline,
                       (try? Self.scalarInt(database, "PRAGMA schema_version")) != retained.baseline.stamp.schemaVersion
                       || (try? Self.scalarInt(database, "PRAGMA user_version")) != retained.baseline.stamp.userVersion
@@ -512,6 +522,7 @@ extension CostUsageStore {
         } catch {
             self.retainedCodexBaseline = nil
             self.retainedCodexRead = nil
+            self.retainedCodexScan = nil
             self.failureGeneration = UUID()
             throw error
         }
@@ -521,6 +532,7 @@ extension CostUsageStore {
     func closeConnectionForTesting() {
         self.retainedCodexBaseline = nil
         self.retainedCodexRead = nil
+        self.retainedCodexScan = nil
         self.connection?.close()
         self.connection = nil
     }
@@ -533,6 +545,7 @@ extension CostUsageStore {
             }
             self.retainedCodexBaseline = nil
             self.retainedCodexRead = nil
+            self.retainedCodexScan = nil
             // Never reopen underneath a transaction (including its COMMIT/ROLLBACK).
             guard sqlite3_get_autocommit(database) != 0 else { throw StoreError.sqlite(SQLITE_IOERR) }
             self.connection?.close()
@@ -689,6 +702,7 @@ extension CostUsageStore {
     private func rebuildDatabase(reason: String) {
         self.retainedCodexBaseline = nil
         self.retainedCodexRead = nil
+        self.retainedCodexScan = nil
         self.connection?.close()
         self.connection = nil
         for suffix in ["", "-wal", "-shm"] {

@@ -147,6 +147,40 @@ extension CodexBarCLI {
         return "Kilo auto fallback attempts: " + parts.joined(separator: " -> ")
     }
 
+    /// Provider-specific by design: Antigravity's auto chain probes several
+    /// distinct local servers, so failures are attributed per source strategy
+    /// (app > cli > ide > oauth > offline) rather than by transport kind alone.
+    static func antigravityAutoFallbackSummary(
+        provider: UsageProvider,
+        sourceMode: ProviderSourceMode,
+        attempts: [ProviderFetchAttempt]) -> String?
+    {
+        guard provider == .antigravity, sourceMode == .auto, !attempts.isEmpty else { return nil }
+        let parts = attempts.map { attempt in
+            let source = Self.antigravitySourceShortLabel(attempt.strategyID)
+            switch attempt.outcome {
+            case .failed:
+                let message = attempt.errorDescription?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return "\(source): \(message.isEmpty ? "failed" : message)"
+            case .skipped:
+                return "\(source): skipped (unavailable)"
+            case .succeeded:
+                return "\(source): success"
+            }
+        }
+        return "Antigravity auto source outcomes: " + parts.joined(separator: " -> ")
+    }
+
+    /// Provider-specific by design: shortens Antigravity strategy IDs to their
+    /// source names (app/cli/ide/oauth/offline).
+    private static func antigravitySourceShortLabel(_ strategyID: String) -> String {
+        guard strategyID.hasPrefix("antigravity.") else { return strategyID }
+        let short = String(strategyID.dropFirst("antigravity.".count))
+        return short.replacingOccurrences(of: "-local", with: "")
+            .replacingOccurrences(of: "-https", with: "")
+    }
+
     static func fetchStatus(
         for provider: UsageProvider,
         transport: any ProviderHTTPTransport = ProviderHTTPClient(session: .shared)) async -> ProviderStatusPayload?
@@ -213,57 +247,36 @@ extension CodexBarCLI {
     }
 
     static func boolFromAppDefaults(_ key: String) -> Bool? {
-        let domains = [
-            "com.steipete.codexbar",
-            "com.steipete.codexbar.debug",
-        ]
-        for domain in domains {
-            #if os(macOS)
-            let cfDomain = domain as CFString
-            CFPreferencesSynchronize(cfDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-            if let cfValue = CFPreferencesCopyValue(
-                key as CFString,
-                cfDomain,
-                kCFPreferencesCurrentUser,
-                kCFPreferencesAnyHost) as? Bool
-            {
-                return cfValue
-            }
-            #endif
-            if let value = UserDefaults(suiteName: domain)?.object(forKey: key) as? Bool {
-                return value
-            }
-        }
-        return UserDefaults.standard.object(forKey: key) as? Bool
+        self.valueFromAppDefaults(key)
     }
 
     static func stringFromAppDefaults(_ key: String) -> String? {
-        let domains = [
-            "com.steipete.codexbar",
-            "com.steipete.codexbar.debug",
-        ]
-        for domain in domains {
+        let value: String? = self.valueFromAppDefaults(key)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    static func valueFromAppDefaults<Value>(_ key: String) -> Value? {
+        for domain in ["com.steipete.codexbar", "com.steipete.codexbar.debug"] {
             #if os(macOS)
             let cfDomain = domain as CFString
             CFPreferencesSynchronize(cfDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-            if let cfValue = CFPreferencesCopyValue(
-                key as CFString,
-                cfDomain,
-                kCFPreferencesCurrentUser,
-                kCFPreferencesAnyHost) as? String,
-                !cfValue.isEmpty
+            if let value = CFPreferencesCopyValue(
+                key as CFString, cfDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? Value,
+                (value as? String)?.isEmpty != true
             {
-                return cfValue
-            }
-            #endif
-            if let value = UserDefaults(suiteName: domain)?.string(forKey: key), !value.isEmpty {
                 return value
             }
+            #endif
+            if let value = UserDefaults(suiteName: domain)?.object(forKey: key) as? Value,
+               (value as? String)?.isEmpty != true { return value }
         }
-        if let value = UserDefaults.standard.string(forKey: key), !value.isEmpty {
-            return value
-        }
-        return nil
+        return UserDefaults.standard.object(forKey: key) as? Value
+    }
+
+    static func costReportingPeriodFromDefaults() -> CostReportingPeriod {
+        .migrated(
+            rawValue: self.stringFromAppDefaults(CostReportingPeriod.defaultsKey),
+            legacyDays: self.valueFromAppDefaults(CostReportingPeriod.legacyDaysKey))
     }
 
     static func fetchProviderUsage(
@@ -471,31 +484,31 @@ struct CLIArgumentError: LocalizedError {
 #if DEBUG
 extension CodexBarCLI {
     static func _usageSignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(UsageOptions())
+        CommandSignature.describe(UsageOptions()).flattened()
     }
 
     static func _costSignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(CostOptions())
+        CommandSignature.describe(CostOptions()).flattened()
     }
 
     static func _cacheSignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(CacheOptions())
+        CommandSignature.describe(CacheOptions()).flattened()
     }
 
     static func _diagnoseSignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(DiagnoseOptions())
+        CommandSignature.describe(DiagnoseOptions()).flattened()
     }
 
     static func _configSetAPIKeySignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(ConfigSetAPIKeyOptions())
+        CommandSignature.describe(ConfigSetAPIKeyOptions()).flattened()
     }
 
     static func _configDumpSignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(ConfigDumpOptions())
+        CommandSignature.describe(ConfigDumpOptions()).flattened()
     }
 
     static func _configProviderToggleSignatureForTesting() -> CommandSignature {
-        CommandSignature.describe(ConfigProviderToggleOptions())
+        CommandSignature.describe(ConfigProviderToggleOptions()).flattened()
     }
 
     static func _decodeFormatForTesting(from values: ParsedValues) -> OutputFormat {

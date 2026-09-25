@@ -64,7 +64,6 @@ public enum UsageProvider: String, CaseIterable, Sendable, Codable {
     case deepseek
     case deepinfra
     case codebuff
-    case crof
     case venice
     case commandcode
     case qoder
@@ -74,10 +73,13 @@ public enum UsageProvider: String, CaseIterable, Sendable, Codable {
     case groq
     case llmproxy
     case litellm
+    case bifrost
+    case aixy
     case deepgram
     case poe
     case chutes
     case neuralwatt
+    case helmcode
     case clawrouter
     case longcat
     case sub2api
@@ -88,6 +90,22 @@ public enum UsageProvider: String, CaseIterable, Sendable, Codable {
     case xai
     case notion
     case ibmbob
+    case nous
+    case muse
+    case coderabbit
+    case replicate
+    case huggingface
+    case raycast
+    case pi
+    case v0
+    case typesafe
+    case hyper
+    case gitkraken
+    case devpass
+    case atlascloud
+    case vercel
+    case llmman
+    case xkiro
 }
 
 // swiftformat:enable sortDeclarations

@@ -73,9 +73,8 @@ struct CostHistoryChartMenuView: View {
     /// Multiplier applied to source-currency amounts at display time so labels can render
     /// in the user's preferred currency while chart geometry stays in source values.
     private let costMultiplier: Double
-    private let historyDays: Int
     private let historyCoverageIsEstablished: Bool
-    private let windowLabel: String?
+    private let windowLabel: String
     private let projects: [CostUsageProjectBreakdown]
     private let sessions: [CostUsageSessionBreakdown]
     private let hidePersonalInfo: Bool
@@ -104,9 +103,8 @@ struct CostHistoryChartMenuView: View {
         self.totalCostUSD = totalCostUSD
         self.currencyCode = currencyCode
         self.costMultiplier = costMultiplier
-        self.historyDays = max(1, min(365, historyDays))
         self.historyCoverageIsEstablished = historyCoverageIsEstablished
-        self.windowLabel = windowLabel
+        self.windowLabel = windowLabel.map { L($0) } ?? Self.windowLabel(days: max(1, historyDays))
         self.projects = projects
         self.sessions = sessions
         self.hidePersonalInfo = hidePersonalInfo
@@ -341,7 +339,7 @@ struct CostHistoryChartMenuView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(
                         format: incompleteCount > 0 ? L("Est. subtotal (%@): %@") : L("Est. total (%@): %@"),
-                        self.windowLabel ?? Self.windowLabel(days: self.historyDays),
+                        self.windowLabel,
                         self.totalCostUSD.map(self.costString) ?? "—")
                         + UsageFormatter.incompleteUsageSuffix(incompleteCount))
                         .font(.caption)
@@ -467,7 +465,7 @@ struct CostHistoryChartMenuView: View {
         let visibleCount = min(self.sessions.count, Self.maxVisibleSessionRows)
         return VStack(alignment: .leading, spacing: Self.sessionRowSpacing) {
             HStack {
-                Text(L("Conversations (%@)", self.windowLabel ?? Self.windowLabel(days: self.historyDays)))
+                Text(L("Conversations (%@)", self.windowLabel))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -698,6 +696,11 @@ struct CostHistoryChartMenuView: View {
         provider: UsageProvider,
         metric: ChartMetric) -> (value: Double, date: Date)?
     {
+        if metric == .cost,
+           ProviderDescriptorRegistry.descriptor(for: provider).tokenCost.presentation == .tokensOnly
+        {
+            return nil
+        }
         let value: Double? = switch metric {
         case .tokens:
             entry.totalTokens.flatMap { $0 >= 0 ? Double($0) : nil }
@@ -745,6 +748,9 @@ struct CostHistoryChartMenuView: View {
     }
 
     private static func defaultMetric(provider: UsageProvider, daily: [DailyEntry]) -> ChartMetric {
+        if ProviderDescriptorRegistry.descriptor(for: provider).tokenCost.presentation == .tokensOnly {
+            return .tokens
+        }
         let available = self.availableMetrics(provider: provider, daily: daily)
         // Provider-specific by design: Codex exposes exact local token totals, so its chart defaults to tokens.
         if provider == .codex, available.contains(.tokens) {

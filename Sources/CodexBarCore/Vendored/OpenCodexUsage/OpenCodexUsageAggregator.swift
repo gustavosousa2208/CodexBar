@@ -29,11 +29,7 @@ enum OpenCodexUsageAggregator {
         var models: [String: ModelAccumulator] = [:]
     }
 
-    struct HourAccumulator {
-        var tokens = CostUsageDailyReport.OptionalCountAccumulator()
-        var cost: Double = 0
-        var sawCost = false
-    }
+    typealias HourAccumulator = CostUsageTemporalTotals
 
     /// Aggregates OpenCodex usage entries into a per-window token/cost snapshot.
     ///
@@ -51,7 +47,7 @@ enum OpenCodexUsageAggregator {
         modelsDevCatalog: ModelsDevCatalog? = nil,
         customPricingOverlay: CostUsageCustomPricing? = nil) -> CostUsageTokenSnapshot
     {
-        let days = max(1, min(365, historyDays))
+        let days = max(1, historyDays)
         let today = calendar.startOfDay(for: now)
         let windowStart = calendar.date(byAdding: .day, value: -(days - 1), to: today) ?? today
         var unique: [String: OpenCodexUsageEntry] = [:]
@@ -88,8 +84,8 @@ enum OpenCodexUsageAggregator {
         // `windowed` is sorted by timestamp, so the day/hour memos hit on almost every entry; a miss only costs one
         // Calendar interval lookup. Price once per entry and reuse it for the day, session and hour merges.
         var windowTokens = CostUsageDailyReport.OptionalCountAccumulator()
-        var dayMemo = LocalDayKeyMemo()
-        var hourMemo = HourStartMemo()
+        var dayMemo = CostUsageLocalDayKeyMemo()
+        var hourMemo = CostUsageHourStartMemo()
         for entry in windowed {
             windowTokens.merge(entry.resolvedTotalCount)
             let cost = Self.listPriceUSD(
@@ -142,10 +138,7 @@ enum OpenCodexUsageAggregator {
 
         let hourly = hoursByStart.keys.sorted().map { hour in
             let bucket = hoursByStart[hour] ?? HourAccumulator()
-            return CostUsageHourlyEntry(
-                hour: hour,
-                totalTokens: bucket.tokens.value,
-                costUSD: bucket.sawCost ? bucket.cost : nil)
+            return bucket.hourlyEntry(hour: hour)
         }
 
         let todayEntry = CostUsageTokenSnapshot.entry(
@@ -229,11 +222,7 @@ enum OpenCodexUsageAggregator {
         cost: Double?,
         into hour: inout HourAccumulator)
     {
-        hour.tokens.merge(entry.resolvedTotalCount)
-        if let cost {
-            hour.cost += cost
-            hour.sawCost = true
-        }
+        hour.add(totalTokens: entry.resolvedTotalCount.value, costUSD: cost)
     }
 
     private static func merge(
@@ -341,54 +330,6 @@ enum OpenCodexUsageAggregator {
         case let (left?, nil): left
         case let (nil, right?): right
         case (nil, nil): nil
-        }
-    }
-}
-
-extension OpenCodexUsageAggregator {
-    /// Reuses the calendar's `[start, next)` day interval while timestamps stay inside it.
-    /// Day keys still come from `CostUsageLocalDay` so DST and non-Gregorian calendars stay aligned: the key derives
-    /// y-m-d from the same Gregorian-in-timezone calendar whose `.day` interval is cached here, so the memo can never
-    /// disagree with computing the key per entry (DST days are simply 23 h / 25 h intervals).
-    private struct LocalDayKeyMemo {
-        var start = Date.distantPast
-        var end = Date.distantPast
-        var key = ""
-
-        mutating func key(for timestamp: Date, calendar: Calendar) -> String {
-            if timestamp >= self.start, timestamp < self.end {
-                return self.key
-            }
-            let dayCalendar = CostUsageLocalDay.gregorianCalendar(matching: calendar)
-            guard let interval = dayCalendar.dateInterval(of: .day, for: timestamp) else {
-                self.start = Date.distantPast
-                self.end = Date.distantPast
-                return CostUsageLocalDay.key(from: timestamp, calendar: calendar)
-            }
-            self.start = interval.start
-            self.end = interval.end
-            self.key = CostUsageLocalDay.key(from: timestamp, calendar: calendar)
-            return self.key
-        }
-    }
-
-    /// Reuses the calendar's hour interval while timestamps stay inside `[start, end)`.
-    private struct HourStartMemo {
-        var start = Date.distantPast
-        var end = Date.distantPast
-
-        mutating func start(for timestamp: Date, calendar: Calendar) -> Date {
-            if timestamp >= self.start, timestamp < self.end {
-                return self.start
-            }
-            guard let interval = calendar.dateInterval(of: .hour, for: timestamp) else {
-                self.start = Date.distantPast
-                self.end = Date.distantPast
-                return timestamp
-            }
-            self.start = interval.start
-            self.end = interval.end
-            return self.start
         }
     }
 }

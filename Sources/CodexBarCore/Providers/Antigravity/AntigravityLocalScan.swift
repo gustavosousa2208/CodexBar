@@ -61,6 +61,9 @@ extension AntigravityLocalReader {
 
     enum ScanFailure: Error {
         case exhausted
+        /// Schema-budget exhaustion (bytes, entries, or columns). Unlike hard row/byte/duration exhaustion,
+        /// schema exhaustion preserves already-decoded rows as partial history instead of withholding the report.
+        case schemaExhausted
         case invalid
     }
 
@@ -105,7 +108,7 @@ extension AntigravityLocalReader {
             try self.check()
             let (attempted, overflow) = self.statistics.schemaBytes.addingReportingOverflow(count)
             self.statistics.schemaBytes = overflow ? Int.max : attempted
-            guard !overflow, attempted <= self.limits.schemaBytes else { throw ScanFailure.exhausted }
+            guard !overflow, attempted <= self.limits.schemaBytes else { throw ScanFailure.schemaExhausted }
         }
     }
 
@@ -152,8 +155,7 @@ extension AntigravityLocalReader {
                 }
                 guard !url.lastPathComponent.hasPrefix("."), url.pathExtension.lowercased() == suffix else { continue }
                 guard result.paths.count < budget.limits.databases else {
-                    result.isComplete = false
-                    return result
+                    throw ScanFailure.exhausted
                 }
                 do {
                     let values = try url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey])

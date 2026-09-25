@@ -5,6 +5,40 @@ import Testing
 @Suite(.serialized)
 struct CostUsageFetcherTests {
     @Test
+    func `all time includes retained logs older than a year`() async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let old = try env.makeLocalNoon(year: 2024, month: 1, day: 31)
+        let now = try env.makeLocalNoon(year: 2026, month: 2, day: 1)
+        try Self.writeCodexSessionFile(
+            homeRoot: env.codexHomeRoot,
+            env: env,
+            day: old,
+            filename: "old.jsonl",
+            tokens: 123)
+        try Self.writeCodexSessionFile(
+            homeRoot: env.codexHomeRoot,
+            env: env,
+            day: now,
+            filename: "new.jsonl",
+            tokens: 7)
+        let options = CostUsageScanner.Options(
+            codexSessionsRoot: env.codexSessionsRoot,
+            cacheRoot: env.cacheRoot,
+            codexTraceDatabaseURL: env.root.appendingPathComponent("missing.sqlite"))
+        let snapshot = try await CostUsageFetcher.loadTokenSnapshot(
+            provider: .codex,
+            now: now.addingTimeInterval(10),
+            forceRefresh: true,
+            historyDays: CostReportingPeriod.allTime.days(now: now),
+            allowPricingRefresh: false,
+            includePiSessions: false,
+            scannerOptions: options)
+        #expect(snapshot.daily.map(\.date) == ["2024-01-31", "2026-02-01"])
+        #expect(snapshot.last30DaysTokens == 130)
+    }
+
+    @Test
     func `native codex sessions survive when pi usage is present but pi merge is disabled`() async throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
@@ -60,6 +94,58 @@ struct CostUsageFetcherTests {
         #expect(merged.sessions.isEmpty)
         #expect(nativeOnly.sessionTokens == 100)
         #expect(nativeOnly.sessions.count == 1)
+    }
+
+    @Test
+    func `token result keeps native projection for inclusive Pi accounting`() async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+
+        let day = try env.makeLocalNoon(year: 2026, month: 4, day: 8)
+        try Self.writeCodexSessionFile(
+            homeRoot: env.codexHomeRoot,
+            env: env,
+            day: day,
+            filename: "native.jsonl",
+            tokens: 100)
+        _ = try env.writePiSessionFile(
+            relativePath: "2026-04-08T10-00-00-000Z_mixed.jsonl",
+            contents: env.jsonl([[
+                "type": "message",
+                "timestamp": env.isoString(for: day),
+                "message": [
+                    "role": "assistant",
+                    "provider": "openai-codex",
+                    "model": "openai/gpt-5.4",
+                    "timestamp": Int(day.timeIntervalSince1970 * 1000),
+                    "usage": ["input": 50, "output": 5, "totalTokens": 55],
+                ],
+            ]]))
+
+        let scannerOptions = CostUsageScanner.Options(
+            codexSessionsRoot: env.codexSessionsRoot,
+            cacheRoot: env.cacheRoot,
+            codexTraceDatabaseURL: env.root.appendingPathComponent("missing-traces.sqlite"))
+        let piOptions = PiSessionCostScanner.Options(
+            piSessionsRoot: env.piSessionsRoot,
+            cacheRoot: env.cacheRoot,
+            refreshMinIntervalSeconds: 0)
+        let result = try await CostUsageFetcher.loadTokenResult(
+            provider: .codex,
+            now: day,
+            historyDays: 1,
+            allowPricingRefresh: false,
+            includePiSessions: true,
+            scannerOptions: scannerOptions,
+            piScannerOptions: piOptions)
+
+        #expect(result.snapshot.sessionTokens == 155)
+        guard case let .includesPi(scope, native) = result.accounting else {
+            Issue.record("expected an inclusive Pi accounting result")
+            return
+        }
+        #expect(!scope.isEmpty)
+        #expect(native.sessionTokens == 100)
     }
 
     @Test
@@ -881,7 +967,8 @@ extension CostUsageFetcherTests {
             CostUsageDailyReport.ModelBreakdown(
                 modelName: "claude-sonnet-4-6",
                 costUSD: nativeCost + piCost,
-                totalTokens: 205),
+                totalTokens: 205,
+                requestCount: 1),
         ])
     }
 

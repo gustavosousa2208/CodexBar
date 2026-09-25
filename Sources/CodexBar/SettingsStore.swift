@@ -267,6 +267,7 @@ final class SettingsStore {
     @ObservationIgnored var selectedMenuProviderRawStorage: String?
     @ObservationIgnored private nonisolated(unsafe) var lowPowerModeObserver: NSObjectProtocol?
     var defaultsState: SettingsDefaultsState
+    var providerSwitcherShortcuts = ProviderSwitcherShortcuts.defaults
     var configRevision: Int = 0
     var providerDetailSettingsRevision: Int = 0
     var backgroundWorkSettingsRevision: Int = 0
@@ -384,6 +385,9 @@ final class SettingsStore {
             userDefaults: userDefaults,
             hadPreviousInstallationState: hadPreviousInstallationState)
         self.defaultsState = defaultsState
+        self.providerSwitcherShortcuts = (try? ProviderSwitcherShortcuts.validated(
+            userDefaults.dictionary(forKey: "switcherShortcuts") as? [String: String] ?? [:]))
+            ?? ProviderSwitcherShortcuts.defaults
         self.mergedMenuLastSelectedWasOverviewStorage = defaultsState.mergedMenuLastSelectedWasOverview
         self.selectedMenuProviderRawStorage = defaultsState.selectedMenuProviderRaw
         self.updateProviderState(config: config)
@@ -534,6 +538,7 @@ extension SettingsStore {
             ?? KiroMenuBarDisplayMode.automatic.rawValue
         let historicalTrackingEnabled = userDefaults.object(forKey: "historicalTrackingEnabled") as? Bool ?? false
         let multiAccountMenuLayoutRaw = Self.loadMultiAccountMenuLayoutRaw(userDefaults: userDefaults)
+        let accountWidgetsEnabled = userDefaults.bool(forKey: "accountWidgetsEnabled")
         let resolvedPreferences = Self.loadMenuBarMetricPreferences(userDefaults: userDefaults)
         let storedMenuBarLayout = Self.loadMenuBarLayout(userDefaults: userDefaults)
         let menuBarLayoutConditionals = Self.loadMenuBarLayoutConditionals(userDefaults: userDefaults)
@@ -551,8 +556,9 @@ extension SettingsStore {
         let costUsageEnabled = userDefaults.object(forKey: "tokenCostUsageEnabled") as? Bool ?? false
         let codexLocalSessionCostLedgerEnabled = userDefaults.object(
             forKey: "codexLocalSessionCostLedgerEnabled") as? Bool ?? false
-        let rawCostUsageHistoryDays = userDefaults.object(forKey: "tokenCostUsageHistoryDays") as? Int ?? 30
-        let costUsageHistoryDays = max(1, min(365, rawCostUsageHistoryDays))
+        let costReportingPeriod = CostReportingPeriod.migrated(
+            rawValue: userDefaults.string(forKey: CostReportingPeriod.defaultsKey),
+            legacyDays: userDefaults.object(forKey: CostReportingPeriod.legacyDaysKey) as? Int)
         let storedBucketTimeZone = userDefaults.string(forKey: "tokenCostUsageBucketTimeZone") ?? ""
         let costUsageBucketTimeZoneIdentifier = CostUsageBucketTimeZone.isValidIdentifier(storedBucketTimeZone)
             ? storedBucketTimeZone
@@ -621,7 +627,12 @@ extension SettingsStore {
         }
         let jetbrainsIDEBasePath = userDefaults.string(forKey: "jetbrainsIDEBasePath") ?? ""
         let mergeIcons = userDefaults.object(forKey: "mergeIcons") as? Bool ?? true
+        let mergedOverviewLayoutRaw = userDefaults.string(forKey: "mergedOverviewLayout")
+            ?? MergedOverviewLayout.detailed.rawValue
         let switcherShowsIcons = userDefaults.object(forKey: "switcherShowsIcons") as? Bool ?? true
+        let mergeIconsStacked = userDefaults.object(forKey: "mergeIconsStacked") as? Bool ?? false
+        let mergeIconStackedTopProviderRaw = userDefaults.string(forKey: "mergeIconStackedTopProvider")
+        let mergeIconStackedBottomProviderRaw = userDefaults.string(forKey: "mergeIconStackedBottomProvider")
         let mergedMenuLastSelectedWasOverview = userDefaults.object(
             forKey: "mergedMenuLastSelectedWasOverview") as? Bool ?? false
         let mergedOverviewSelectedProvidersRaw = userDefaults.array(
@@ -658,6 +669,8 @@ extension SettingsStore {
             debugLoadingPatternRaw: debugLoadingPatternRaw,
             debugKeepCLISessionsAlive: debugKeepCLISessionsAlive,
             statusChecksEnabled: notificationDefaults.statusChecksEnabled,
+            stayAwakeEnabled: userDefaults.bool(forKey: "stayAwakeEnabled"),
+            credentialExpiryNotificationsEnabled: userDefaults.bool(forKey: "credentialExpiryNotificationsEnabled"),
             sessionQuotaNotificationsEnabled: notificationDefaults.sessionQuotaNotificationsEnabled,
             quotaWarningNotificationsEnabled: quotaWarnings.notificationsEnabled,
             predictivePaceWarningNotificationsEnabled: notificationDefaults.predictivePaceWarningNotificationsEnabled,
@@ -684,6 +697,7 @@ extension SettingsStore {
             kiroMenuBarDisplayModeRaw: kiroMenuBarDisplayModeRaw,
             historicalTrackingEnabled: historicalTrackingEnabled,
             multiAccountMenuLayoutRaw: multiAccountMenuLayoutRaw,
+            accountWidgetsEnabled: accountWidgetsEnabled,
             menuBarMetricPreferencesRaw: resolvedPreferences,
             storedMenuBarLayout: storedMenuBarLayout,
             menuBarLayoutConditionals: menuBarLayoutConditionals,
@@ -696,7 +710,7 @@ extension SettingsStore {
             copilotSeatCreditEntitlementRaw: copilotSeatCreditEntitlementRaw,
             costUsageEnabled: costUsageEnabled,
             codexLocalSessionCostLedgerEnabled: codexLocalSessionCostLedgerEnabled,
-            costUsageHistoryDays: costUsageHistoryDays,
+            costReportingPeriod: costReportingPeriod,
             costUsageBucketTimeZoneIdentifier: costUsageBucketTimeZoneIdentifier,
             openCodexUsageLogsEnabled: openCodexUsageLogsEnabled,
             hideNativeCodexCostWhenOpenCodexPresent: hideNativeCodexCostWhenOpenCodexPresent,
@@ -723,7 +737,11 @@ extension SettingsStore {
             providerStorageFootprintsEnabled: providerStorageFootprintsEnabled,
             jetbrainsIDEBasePath: jetbrainsIDEBasePath,
             mergeIcons: mergeIcons,
+            mergedOverviewLayoutRaw: mergedOverviewLayoutRaw,
             switcherShowsIcons: switcherShowsIcons,
+            mergeIconsStacked: mergeIconsStacked,
+            mergeIconStackedTopProviderRaw: mergeIconStackedTopProviderRaw,
+            mergeIconStackedBottomProviderRaw: mergeIconStackedBottomProviderRaw,
             mergedMenuLastSelectedWasOverview: mergedMenuLastSelectedWasOverview,
             mergedOverviewSelectedProvidersRaw: mergedOverviewSelectedProvidersRaw,
             selectedMenuProviderRaw: selectedMenuProviderRaw,
@@ -876,6 +894,7 @@ extension SettingsStore {
     private static func loadMenuBarLayout(userDefaults: UserDefaults) -> MenuBarLayout? {
         MenuBarLayoutPersistence.loadLayout(
             current: self.decodeMenuBarLayout(userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.layoutCurrent)),
+            v3: self.decodeMenuBarLayout(userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.layoutV3)),
             released: self.decodeMenuBarLayout(
                 userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.layoutReleased)),
             legacy: self.decodeMenuBarLayout(userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.layout)),
@@ -888,6 +907,8 @@ extension SettingsStore {
         MenuBarLayoutPersistence.loadLibrary(
             current: self.decodeMenuBarLayoutConditionals(
                 userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.conditionalsCurrent)),
+            v3: self.decodeMenuBarLayoutConditionals(
+                userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.conditionalsV3)),
             released: self.decodeMenuBarLayoutConditionals(
                 userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.conditionalsReleased)),
             legacy: self.decodeMenuBarLayoutConditionals(
@@ -908,6 +929,8 @@ extension SettingsStore {
         MenuBarLayoutPersistence.loadOverrides(
             current: self.decodeMenuBarLayoutOverrides(
                 userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.overridesCurrent)),
+            v3: self.decodeMenuBarLayoutOverrides(
+                userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.overridesV3)),
             released: self.decodeMenuBarLayoutOverrides(
                 userDefaults.data(forKey: MenuBarLayoutUserDefaultsKey.overridesReleased)),
             legacy: self.decodeMenuBarLayoutOverrides(
@@ -1076,11 +1099,19 @@ extension SettingsStore {
     }
 
     func providerEnablementRevision(for provider: UsageProvider) -> UInt64 {
-        self.providerEnablementRevisions[provider.instanceID, default: 0]
+        self.providerEnablementRevision(forInstanceID: provider.instanceID)
     }
 
     func providerConfigRevision(for provider: UsageProvider) -> UInt64 {
-        self.providerConfigRevisions[provider.instanceID, default: 0]
+        self.providerConfigRevision(forInstanceID: provider.instanceID)
+    }
+
+    func providerEnablementRevision(forInstanceID instanceID: ProviderInstanceID) -> UInt64 {
+        self.providerEnablementRevisions[instanceID, default: 0]
+    }
+
+    func providerConfigRevision(forInstanceID instanceID: ProviderInstanceID) -> UInt64 {
+        self.providerConfigRevisions[instanceID, default: 0]
     }
 
     func orderedProviders() -> [ProviderInstanceID] {

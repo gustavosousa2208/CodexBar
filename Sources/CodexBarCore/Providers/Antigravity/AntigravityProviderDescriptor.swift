@@ -8,11 +8,18 @@ public enum AntigravityProviderDescriptor {
         placeholder: "Antigravity OAuth credentials JSON",
         injection: .environment(key: AntigravityOAuthCredentialsStore.environmentCredentialsKey),
         requiresManualCookieSource: false,
-        cookieName: nil))
+        cookieName: nil,
+        passiveSourceModes: [.cli]))
 
     static func makeDescriptor() -> ProviderDescriptor {
         ProviderDescriptor(
             id: .antigravity,
+            menuBarMetrics: ProviderMenuBarMetricCapabilities(
+                supported: [.automatic, .primary, .secondary],
+                namedExtras: [
+                    "antigravity-quota-summary-gemini-weekly": "Gemini weekly",
+                    "antigravity-quota-summary-3p-weekly": "Claude/GPT weekly",
+                ]),
             credentials: self.credentials,
             metadata: ProviderMetadata(
                 id: .antigravity,
@@ -50,12 +57,18 @@ public enum AntigravityProviderDescriptor {
                 ]),
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: true,
-                noDataMessage: { "Antigravity cost summary is not supported." },
-                supportsTokenSnapshot: true),
-            pace: ProviderPaceCapability(
-                sessionPaceWindowRule: .custom { window, _ in
-                    window.windowMinutes == nil || window.windowMinutes == 300
-                }),
+                noDataMessage: { Self.noDataMessageKey },
+                menuHintLines: [.localized(self.estimateHintKey)],
+                supportsTokenSnapshot: true,
+                settingsStatusOrder: 3,
+                showsHintInProviderDetails: true,
+                estimateDisclaimer: "Local usage × public API prices · not Antigravity charges or credits",
+                historyTitleStyle: .compact,
+                hintPlacement: .beforeRequestHistory,
+                chartEstimateDisclaimer: .localized(self.estimateHintKey),
+                preservesCalendarDaysInCharts: true,
+                presentation: .costAndTokens),
+            pace: ProviderPaceCapability(sessionPaceWindowRule: .windowDuration(minutes: 300)),
             history: .alwaysTracked,
             presentation: ProviderUsagePresentation(
                 iconWindowResolver: self.iconWindows,
@@ -74,7 +87,17 @@ public enum AntigravityProviderDescriptor {
                         return nil
                     }
                     return family == .small ? 2 : 3
-                }),
+                },
+                menuCard: ProviderMenuCardPresentation(
+                    supportsInlineTokenCostDashboard: true,
+                    showsQuotaWeekCost: true,
+                    // Antigravity has no single account-wide weekly quota: it reports a weekly bucket
+                    // per model family, and `semanticWindows` surfaces whichever family is most
+                    // constrained, while the cost bucketed into it spans every model.
+                    quotaWindowNote: self.quotaWindowNoteKey,
+                    // Because that surfaced reset belongs to whichever family currently leads, stored
+                    // observations name unrelated families' resets and must not become boundaries.
+                    ignoresObservedQuotaResetBoundaries: true)),
             fetchPlan: ProviderFetchPlan(
                 sourceModes: [.auto, .cli, .oauth],
                 pipeline: ProviderFetchPipeline(
@@ -85,6 +108,10 @@ public enum AntigravityProviderDescriptor {
                 versionDetector: nil,
                 supportsCostCommand: true))
     }
+
+    static let estimateHintKey = "antigravity_cost_estimate_hint"
+    static let quotaWindowNoteKey = "antigravity_quota_window_note"
+    static let noDataMessageKey = "antigravity_no_priced_token_history"
 
     private static let quotaSummaryPrefix = "antigravity-quota-summary-"
     private static let compactFallbackPrefix = "antigravity-compact-fallback-"
@@ -573,9 +600,9 @@ struct AntigravityCLIHTTPSFetchStrategy: ProviderFetchStrategy {
                 ["-p", "/usage", "--output-format", "json", "--print-timeout", "90s"], timeout: timeout)
         } catch let error as SubprocessRunnerError {
             try Task.checkCancellation()
-            if case .timedOut = error { throw AntigravityStatusProbeError.timedOut }
-            // Subprocess errors may contain raw stderr; never surface it as a provider diagnostic.
-            throw AntigravityStatusProbeError.parseFailed("CLI usage report failed")
+            // Subprocess errors may contain raw stderr; classify them into safe,
+            // fixed diagnostics instead of surfacing the process output.
+            throw AntigravityCLIPrintFailure.error(for: error)
         }
         let snapshot = try AntigravityStatusProbe.parseCLIUsageReport(Data(result.stdout.utf8))
         return try self.makeResult(usage: snapshot.toUsageSnapshot(), sourceLabel: Self.sourceLabel)
@@ -783,9 +810,13 @@ struct AntigravityCLIHTTPSFetchStrategy: ProviderFetchStrategy {
                     // Fresh `agy` processes can answer quota endpoints before the
                     // signed-in account email is available; keep polling so the
                     // account guard does not reject the cold-start snapshot.
-                    lastFetchError = AntigravityStatusProbeError.accountMismatch(
+                    let mismatch = AntigravityStatusProbeError.accountMismatch(
                         expected: expectedAccountEmail,
                         found: readySnapshot.accountEmail)
+                    if readySnapshot.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                        throw mismatch
+                    }
+                    lastFetchError = mismatch
                     Self.log.debug(
                         "Antigravity CLI HTTPS snapshot account not ready yet",
                         metadata: [
@@ -943,6 +974,52 @@ struct AntigravityOfflineFetchStrategy: ProviderFetchStrategy {
                 accountOrganization: nil,
                 loginMethod: "offline"))
         return self.makeResult(usage: snapshot, sourceLabel: "offline")
+    }
+
+    func diagnostic(forPriorFailure error: Error) -> String? {
+        "Live Antigravity usage is unavailable; showing offline data. \(Self.reason(for: error))"
+    }
+
+    /// Only our own classified descriptions are safe to surface here:
+    /// `apiError` messages can embed a raw response body, and foreign error
+    /// types (e.g. an unmapped `SubprocessRunnerError`) may carry stderr, so
+    /// anything unrecognized reduces to a fixed hint.
+    private static func reason(for error: Error) -> String {
+        switch error {
+        case let probeError as AntigravityStatusProbeError:
+            switch probeError {
+            case let .apiError(message):
+                if message.contains("HTTP 401") || message.contains("HTTP 403") {
+                    // Already the fixed "session expired" text.
+                    return probeError.localizedDescription
+                }
+                if let status = message.range(of: #"HTTP \d{3}"#, options: .regularExpression) {
+                    return "the usage request failed (\(message[status]))"
+                }
+                return "the usage request failed"
+            // These cases contain only fixed text and typed CLI failure categories.
+            case .notRunning, .missingCSRFToken, .timedOut, .authenticationRequired,
+                 .cliReportFailed:
+                return probeError.localizedDescription
+            case .accountMismatch:
+                return "the local Antigravity session does not match the selected account"
+            // `parseFailed`/`portDetectionFailed` carry a free-form message; today
+            // every throw site uses a fixed literal, but reduce them anyway so a
+            // future dynamic message cannot reach the card.
+            case .parseFailed, .portDetectionFailed:
+                return "check Diagnostics for per-source details"
+            }
+        case let remoteError as AntigravityRemoteFetchError:
+            if case .notLoggedIn = remoteError {
+                return remoteError.localizedDescription
+            }
+            return "the Antigravity API request failed"
+        case let urlError as URLError:
+            // Discard caller-supplied userInfo, which can contain URLs or account details.
+            return URLError(urlError.code).localizedDescription
+        default:
+            return "check Diagnostics for per-source details"
+        }
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {

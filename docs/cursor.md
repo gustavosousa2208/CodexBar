@@ -138,7 +138,9 @@ Two totals are reported from the same events:
 
 API-list-price estimates are not estimates of actual Cursor charges: they do not apply plan-specific Cursor Token Rates, regional adjustments, or legacy billing rules. `chargedCents` and Cursor-metered totals remain separate and unchanged. In Overview, history coverage describes the included sources' established history; a selected subscription without spend still makes amounts partial and remains disclosed in the subscription count, without erasing another source's known history days.
 
-Caching: the app holds the snapshot for an in-memory hourly TTL, keyed by the history window plus the cookie source and resolved account (manual-cookie hash or auto-mode account fingerprint), so switching accounts or pasting a new cookie invalidates it immediately.
+Caching: automatic cost refreshes follow the app's token-cost cadence, with a minimum interval of 15 minutes (30 minutes in Low Power Mode). Snapshots are scoped to the history window, cookie source, and resolved account (manual-cookie hash or auto-mode account fingerprint), so switching accounts or pasting a new cookie invalidates them immediately.
+
+An HTTP 403 from the cost endpoint records a failed cost source with an in-memory retry time at least six hours later, even when no cost snapshot is available. It does not invalidate the working quota session or change local CSV fallback. Manual and menu-open refreshes bypass the cooldown, and a changed account, credential source, history window, timezone, or provider configuration permits a new attempt. Timed-out cost scans keep their normal cooldown without a snapshot; transient failures retain their normal retry behavior. Restarting the app clears this in-memory cooldown.
 
 If Auto fetches usage with a cookie that the app still cannot confirm for the current account, the result stays unpublished. An unchanged account scope waits for the next normal or manual refresh instead of repeatedly forcing another request. Real account, history-window, provider, or cost-timezone changes still request a replacement; a successful fetch that confirms its own cookie can publish immediately.
 
@@ -149,6 +151,18 @@ If Auto fetches usage with a cookie that the app still cannot confirm for the cu
 - Extra: Grok Bot usage from `get-sand-usage-status` when the account has a paid allowance or an unexpired trial. The current `includedLimitZero` field takes precedence over the older allowance flag. Exhausted active trials remain visible; missing, malformed, or expired trial dates do not grant an allowance. Grok Bot is not the semantic weekly window, so monthly Cursor Auto pace stays on the Cursor bar when this extra 7-day window is present. Paid 7-day Grok Bot extras still show weekly pace on that extra bar; trial extras without a recurring reset do not.
 - Provider cost: Extra usage USD. A capped individual budget wins; team accounts without a user cap use the shared team on-demand budget.
 - Reset: billing cycle end date for monthly bars; paid Grok Bot uses `nextResetTimestampUtc`, even if a trial-expiry field is also present. Trial-only allowances have no recurring reset or duration because trial expiration does not replenish quota.
+
+## Menu-bar layout
+
+In the menu-bar layout editor, select the Cursor override and drag **Grok Bot %** from the usage palette
+onto a line, for example beside the icon. It follows the used/remaining preference and reads the same
+allowance as the card. The palette token and its rendered percentage disappear when the snapshot has no
+active Grok Bot allowance, including a zero included limit without an active trial. The saved placement
+remains and reappears when the allowance returns; Auto % continues to use Cursor's standard windows.
+
+Named-extra selections are stored in V4 layout keys. A V3 projection omits them while preserving explicit
+reset-window selections for 0.60.x; V2/V1 projections remain available for older releases. An unchanged
+downgrade preserves the full layout on return, while edits made in an older release take precedence.
 
 ## Key files
 - `Sources/CodexBarCore/Providers/Cursor/CursorAppAuth.swift`
@@ -177,3 +191,7 @@ fifty members. It requires consistent page-count metadata, full intermediate pag
 matching member. Missing completion metadata, duplicate matches, or unavailable, invalid, or incomplete responses
 preserve usage-summary behavior. Billing dates and extra/on-demand charges remain sourced from usage-summary;
 team response dates and other members' details are not retained. Caller cancellation still stops the fetch.
+
+## Cost reporting period
+
+The shared [cost reporting period](cost-reporting-periods.md) supports month-to-date in the pinned cost time zone. Cursor-metered spend and daily estimates use the same event window. Quota bars continue to follow Cursor’s billing-cycle start/end dates, which can fall mid-month.

@@ -2,35 +2,54 @@
 (function applyProviderPluginPrelude(ctx, host) {
   "use strict";
 
+  const httpRejection = (reject) => (failure) => reject(Object.assign(new Error(failure.message), failure));
+  const get = (url, opts, wantsJSON) =>
+    new Promise((resolve, reject) =>
+      host.http(String(url), opts || {}, "GET", wantsJSON, resolve, httpRejection(reject)),
+    );
+
   ctx.http = Object.freeze({
     getJSON(url, opts) {
-      return new Promise((resolve, reject) => host.http(String(url), opts || {}, "GET", true, resolve, reject));
+      return get(url, opts, true);
     },
     get(url, opts) {
-      return new Promise((resolve, reject) => host.http(String(url), opts || {}, "GET", false, resolve, reject));
+      return get(url, opts, false);
+    },
+    getWithOptional(url, optionalURL, opts) {
+      return get(url, { ...opts, optionalURL: String(optionalURL) }, false);
+    },
+    post(url, opts) {
+      return jsonPost(url, opts, false);
     },
     postJSON(url, opts) {
-      if (!opts || typeof opts !== "object" || !("body" in opts)) {
-        return Promise.reject(new TypeError("postJSON requires a body"));
-      }
-      let bodyJSON;
-      try {
-        bodyJSON = JSON.stringify(opts.body);
-      } catch (error) {
-        return Promise.reject(new TypeError(`postJSON body is not JSON-serializable: ${error.message}`));
-      }
-      if (bodyJSON === undefined) {
-        return Promise.reject(new TypeError("postJSON body is not JSON-serializable"));
-      }
-      const hostOptions = { bodyJSON };
-      if (opts.headers !== undefined) hostOptions.headers = opts.headers;
-      if (opts.timeoutSeconds !== undefined) hostOptions.timeoutSeconds = opts.timeoutSeconds;
-      if (opts.openRouterManagementAuth !== undefined) {
-        hostOptions.openRouterManagementAuth = opts.openRouterManagementAuth;
-      }
-      return new Promise((resolve, reject) => host.http(String(url), hostOptions, "POST", true, resolve, reject));
+      return jsonPost(url, opts, true);
     },
   });
+
+  function jsonPost(url, opts, wantsJSON) {
+    if (!opts || typeof opts !== "object" || !("body" in opts)) {
+      return Promise.reject(new TypeError("postJSON requires a body"));
+    }
+    let bodyJSON;
+    try {
+      bodyJSON = JSON.stringify(opts.body);
+    } catch (error) {
+      return Promise.reject(new TypeError(`postJSON body is not JSON-serializable: ${error.message}`));
+    }
+    if (bodyJSON === undefined) {
+      return Promise.reject(new TypeError("postJSON body is not JSON-serializable"));
+    }
+    const hostOptions = { bodyJSON };
+    if (opts.headers !== undefined) hostOptions.headers = opts.headers;
+    if (opts.timeoutSeconds !== undefined) hostOptions.timeoutSeconds = opts.timeoutSeconds;
+    if (opts.retryPolicy !== undefined) hostOptions.retryPolicy = opts.retryPolicy;
+    if (opts.openRouterManagementAuth !== undefined) {
+      hostOptions.openRouterManagementAuth = opts.openRouterManagementAuth;
+    }
+    return new Promise((resolve, reject) =>
+      host.http(String(url), hostOptions, "POST", wantsJSON, resolve, httpRejection(reject)),
+    );
+  }
 
   ctx.settings = Object.freeze({
     get(key) {
@@ -38,6 +57,18 @@
     },
     getSecret(key) {
       return host.settingGet(String(key), true);
+    },
+  });
+
+  ctx.storage = Object.freeze({
+    get(key) {
+      return host.storage("get", key, undefined);
+    },
+    set(key, value) {
+      host.storage("set", key, value);
+    },
+    remove(key) {
+      host.storage("remove", key, undefined);
     },
   });
 
@@ -79,8 +110,24 @@
   );
 
   ctx.browser = Object.freeze({
+    availability(domain) {
+      return host.cookieAvailability(String(domain));
+    },
+    rejectCookie(domain, session) {
+      host.rejectCookie(String(domain), session === undefined ? "" : String(session.id));
+    },
+    async *sessions(domain, options) {
+      while (true) {
+        const payload = await new Promise((resolve, reject) =>
+          host.cookieSession(String(domain), Boolean(options && options.cachedOnly), resolve, reject),
+        );
+        const session = JSON.parse(payload);
+        if (session === null) return;
+        yield Object.freeze(session);
+      }
+    },
     cookieHeader(domain) {
-      return new Promise((resolve, reject) => host.cookieHeader(String(domain), resolve, reject));
+      return new Promise((resolve, reject) => host.cookieHeader(String(domain), false, resolve, reject));
     },
   });
 
@@ -143,6 +190,9 @@
   }
 
   ctx.format = Object.freeze({
+    currency(value, currencyCode) {
+      return host.formatCurrency(Number(value), String(currencyCode));
+    },
     number(value, options) {
       return formatNumber(value, options);
     },

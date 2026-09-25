@@ -226,10 +226,69 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
     func `print failure does not expose stderr`() async throws {
         let fixture = try Self.printExecutable("printf 'synthetic-private-diagnostic' >&2; exit 7")
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        await #expect(throws: AntigravityStatusProbeError.parseFailed("CLI usage report failed")) {
-            try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
+        do {
+            _ = try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
                 binary: fixture.binary.path, environment: fixture.environment)
+            Issue.record("Expected a classified print failure")
+        } catch let error as AntigravityStatusProbeError {
+            #expect(error == .cliReportFailed(.exited(code: 7, reason: .unspecified)))
+            #expect(error.localizedDescription.contains("synthetic-private-diagnostic") == false)
+        } catch {
+            Issue.record("Expected a classified probe error, got \(error)")
         }
+    }
+
+    @Test(arguments: [
+        (
+            #"Eligibility check failed: failed to get profile picture: Get "https://lh3.googleusercontent.com/a/private": EOF"#,
+            AntigravityStatusProbeError.cliReportFailed(
+                .exited(code: 1, reason: .eligibilityNetwork))),
+        (
+            "Eligibility check failed: account does not support Google ToS",
+            AntigravityStatusProbeError.cliReportFailed(.exited(code: 1, reason: .ineligible))),
+        (
+            "You are not logged into Antigravity",
+            AntigravityStatusProbeError.authenticationRequired),
+        (
+            "Post \"https://usage.invalid/v1\": dial tcp: no such host",
+            AntigravityStatusProbeError.cliReportFailed(
+                .exited(code: 1, reason: .network))),
+    ])
+    func `print failure maps agy stderr to a safe diagnostic`(
+        stderr: String,
+        expected: AntigravityStatusProbeError) async throws
+    {
+        let fixture = try Self.printExecutable("""
+        /bin/cat >&2 <<'STDERR'
+        \(stderr)
+        STDERR
+        exit 1
+        """)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        do {
+            _ = try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
+                binary: fixture.binary.path, environment: fixture.environment)
+            Issue.record("Expected a classified print failure")
+        } catch let error as AntigravityStatusProbeError {
+            #expect(error == expected)
+            #expect(error.localizedDescription.contains("googleusercontent") == false)
+            #expect(error.localizedDescription.contains("usage.invalid") == false)
+        } catch {
+            Issue.record("Expected a classified probe error, got \(error)")
+        }
+    }
+
+    @Test
+    func `print failure classifier keeps timeouts and blank exits safe`() {
+        #expect(AntigravityCLIPrintFailure.error(for: .timedOut("antigravity-cli-usage")) == .timedOut)
+        #expect(AntigravityCLIPrintFailure.error(for: .nonZeroExit(code: 2, stderr: "  ")) ==
+            .cliReportFailed(.exited(code: 2, reason: .unspecified)))
+        #expect(AntigravityCLIPrintFailure.error(for: .binaryNotFound("agy")) ==
+            .cliReportFailed(.executableNotFound))
+        #expect(AntigravityCLIPrintFailure.error(for: .launchFailed("posix_spawn failed")) ==
+            .cliReportFailed(.launchFailed))
+        #expect(AntigravityCLIPrintFailure.error(for: .outputTooLarge("antigravity-cli-usage")) ==
+            .parseFailed("CLI usage report failed"))
     }
 
     @Test
@@ -245,11 +304,12 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
     @Test(arguments: [true, false])
     func `print timeout terminates its process`(versionKnown: Bool) async throws {
         let fixture = try Self.printExecutable(
-            "echo $$ > \"$HOME/pid\"; exec /bin/sleep 10", version: versionKnown ? "1.2.2" : nil)
+            "echo $$ > \"$HOME/pid.tmp\"; /bin/mv \"$HOME/pid.tmp\" \"$HOME/pid\"; exec /bin/sleep 10",
+            version: versionKnown ? "1.2.2" : nil)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         await #expect(throws: AntigravityStatusProbeError.timedOut) {
             try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
-                binary: fixture.binary.path, environment: fixture.environment, timeout: 1)
+                binary: fixture.binary.path, environment: fixture.environment, timeout: 3)
         }
         try Self.expectPrintProcessExited(in: fixture.directory)
     }
@@ -257,7 +317,8 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
     @Test(arguments: [true, false])
     func `print cancellation terminates its process`(versionKnown: Bool) async throws {
         let fixture = try Self.printExecutable(
-            "echo $$ > \"$HOME/pid\"; exec /bin/sleep 10", version: versionKnown ? "1.2.2" : nil)
+            "echo $$ > \"$HOME/pid.tmp\"; /bin/mv \"$HOME/pid.tmp\" \"$HOME/pid\"; exec /bin/sleep 10",
+            version: versionKnown ? "1.2.2" : nil)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let task = Task {
             try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
@@ -265,14 +326,22 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
         }
         defer { task.cancel() }
         let deadline = Date().addingTimeInterval(3)
-        while !FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("pid").path),
-              Date() < deadline
-        {
+        var observedPID: Int32?
+        while Date() < deadline {
+            if let text = try? String(contentsOf: fixture.directory.appendingPathComponent("pid"), encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+               pid > 0, kill(pid, 0) == 0
+            {
+                observedPID = pid
+                break
+            }
             try await Task.sleep(for: .milliseconds(20))
         }
+        // File creation precedes its contents; cancellation must wait for a published, running process.
         task.cancel()
         await #expect(throws: CancellationError.self) { try await task.value }
-        try Self.expectPrintProcessExited(in: fixture.directory)
+        let pid = try #require(observedPID)
+        #expect(kill(pid, 0) == -1)
     }
 
     @Test(arguments: [
